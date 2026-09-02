@@ -1,0 +1,38 @@
+services:
+  screentinker:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    restart: unless-stopped
+    ports:
+      - "3001:3001"
+    environment:
+      SELF_HOSTED: "true"
+      JWT_SECRET: ${JWT_SECRET}
+    volumes:
+      - st-data:/data
+    healthcheck:
+      test: ["CMD", "node", "-e", "fetch('http://localhost:3001/api/status').then(r=>process.exit(r.ok?0:1)).catch(()=>process.exit(1))"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 30s
+
+  mediamtx:
+    image: bluenviron/mediamtx:latest
+    restart: unless-stopped
+    ports:
+      - "8888:8888"
+      - "8554:8554"
+    environment:
+      MTX_HLSVARIANT: lowLatency
+      MTX_HLSSEGMENTDURATION: 1s
+      MTX_HLSPARTDURATION: 200ms
+      MTX_HLSSEGMENTMAXSIZE: 50M
+      MTX_PATHS_CAMERA-ROBOTER-1_SOURCE: ${CAMERA_1_RTSP_URL}
+      MTX_PATHS_CAMERA-ROBOTER-1_SOURCEONDEMAND: "yes"
+      MTX_PATHS_CAMERA-ROBOTER-2_SOURCE: ${CAMERA_2_RTSP_URL}
+      MTX_PATHS_CAMERA-ROBOTER-2_SOURCEONDEMAND: "yes"
+
+volumes:
+  st-data:
