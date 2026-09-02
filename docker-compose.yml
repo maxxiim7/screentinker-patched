@@ -52,15 +52,7 @@ services:
     command:
       - sh
       - -c
-      - >
-        while true; do
-          ffmpeg -rtsp_transport tcp -i rtsp://mediamtx:8554/camera-roboter-2
-                 -rtsp_transport tcp -i rtsp://mediamtx:8554/camera-roboter-1
-                 -filter_complex "[0:v]scale=960:540[l];[1:v]scale=960:540[r];[l][r]hstack=inputs=2[out]"
-                 -map "[out]" -an -c:v libx264 -preset veryfast -tune zerolatency -g 50
-                 -f rtsp -rtsp_transport tcp rtsp://mediamtx:8554/combined-view;
-          sleep 5;
-        done
+      - "while true; do ffmpeg -rtsp_transport tcp -i rtsp://mediamtx:8554/camera-roboter-2 -rtsp_transport tcp -i rtsp://mediamtx:8554/camera-roboter-1 -filter_complex '[0:v]scale=960:540[l];[1:v]scale=960:540[r];[l][r]hstack=inputs=2[out]' -map '[out]' -an -c:v libx264 -preset veryfast -tune zerolatency -g 50 -f rtsp -rtsp_transport tcp rtsp://mediamtx:8554/combined-view; sleep 5; done"
 
 volumes:
   st-data:
