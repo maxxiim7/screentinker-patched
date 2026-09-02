@@ -1,0 +1,9 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <string name="app_name">RemoteDisplay</string>
+    <string name="accessibility_description">RemoteDisplay nutzt die Bedienungshilfen, um Fernsteuerung der Stromzufuhr und Systemnavigation zu ermöglichen.</string>
+    <string name="nothing_scheduled">Derzeit ist nichts geplant</string>
+    <string name="waiting_for_content">Warte auf Inhalte…</string>
+    <string name="device_blocked_status">Dieser Bildschirm wurde im Dashboard gesperrt</string>
+    <string name="device_unpaired_status">Dieser Bildschirm wurde entkoppelt — warte auf erneute Kopplung</string>
+</resources>

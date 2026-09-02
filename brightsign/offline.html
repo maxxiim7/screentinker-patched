@@ -1,0 +1,119 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>ScreenTinker — reconnecting</title>
+<style>
+  /* Deliberately self-contained: this page is the thing that shows when the network is gone,
+     so it can never depend on a font, a stylesheet or an image it would have to fetch. */
+  html, body {
+    margin: 0; height: 100%;
+    background: #0d1117; color: #c9d1d9;
+    font-family: system-ui, -apple-system, "Segoe UI", Roboto, sans-serif;
+    display: flex; align-items: center; justify-content: center;
+  }
+  .card { text-align: center; max-width: 70vw; }
+  h1 { font-size: 3.2vw; font-weight: 600; margin: 0 0 1.2vh; color: #e6edf3; }
+  p  { font-size: 1.6vw; line-height: 1.5; margin: 0.6vh 0; color: #8b949e; }
+  .server { font-family: ui-monospace, "SF Mono", Menlo, monospace; color: #58a6ff; word-break: break-all; }
+  .dot {
+    display: inline-block; width: 0.9vw; height: 0.9vw; border-radius: 50%;
+    background: #f85149; margin-right: 0.6vw; vertical-align: middle;
+    animation: pulse 2s ease-in-out infinite;
+  }
+  @keyframes pulse { 0%, 100% { opacity: 1 } 50% { opacity: 0.25 } }
+  .meta { margin-top: 3vh; font-size: 1.1vw; color: #6e7681; }
+</style>
+</head>
+<body>
+  <div class="card">
+    <h1><span class="dot"></span>Can't reach the server</h1>
+    <p>This display is working. It cannot currently reach</p>
+    <p class="server" id="server">its ScreenTinker server</p>
+    <p id="status">Retrying…</p>
+    <p class="meta" id="meta"></p>
+  </div>
+
+<script>
+/*
+ * The local fallback page. autorun.brs loads this after three failed attempts at the real player,
+ * so the screen says something truthful instead of showing white until someone visits the site.
+ *
+ * Two jobs, and nothing else:
+ *   1. Say what is wrong, and name the server, so whoever walks past can act on it.
+ *   2. Keep testing, and hand control back the moment the server answers.
+ *
+ * It asks the HOST to restart the widget rather than navigating itself — same reason the player
+ * never calls location.reload() on this platform: an in-page navigation is not reliably a restart
+ * an roHtmlWidget comes back from.
+ */
+(function () {
+  'use strict';
+
+  function qs(name) {
+    var m = new RegExp('[?&]' + name + '=([^&]*)').exec(location.search || '');
+    return m ? decodeURIComponent(m[1]) : null;
+  }
+
+  var server = qs('server') || '';
+  var attempt = 0;
+  var startedAt = Date.now();
+
+  if (server) document.getElementById('server').textContent = server;
+
+  var port = null;
+  try {
+    if (typeof require === 'function') {
+      var MessagePortClass = require('@brightsign/messageport');
+      port = new MessagePortClass();
+    }
+  } catch (e) { port = null; }
+
+  function setStatus(text) { document.getElementById('status').textContent = text; }
+  function setMeta(text) { document.getElementById('meta').textContent = text; }
+
+  function minutesDown() {
+    var m = Math.floor((Date.now() - startedAt) / 60000);
+    return m < 1 ? 'less than a minute' : (m === 1 ? '1 minute' : m + ' minutes');
+  }
+
+  function probe() {
+    attempt++;
+    if (!server) { setStatus('No server configured on this card.'); return; }
+
+    setStatus('Retrying… (attempt ' + attempt + ')');
+
+    // cache-bust: a stale 200 from the widget cache would send us back to a server that is still
+    // down, and the host would bounce straight back here — a loop that looks like flickering.
+    var url = server.replace(/\/+$/, '') + '/api/status?probe=' + Date.now();
+
+    fetch(url, { cache: 'no-store' })
+      .then(function (r) {
+        if (!r.ok) throw new Error('HTTP ' + r.status);
+        setStatus('Server is back — restarting the player…');
+        if (port && typeof port.PostBSMessage === 'function') {
+          port.PostBSMessage({ type: 'restart', reason: 'server reachable again' });
+        } else {
+          // No host bridge (widget without node integration). Navigating is second best, but
+          // doing nothing would strand the panel here forever.
+          location.href = server;
+        }
+      })
+      .catch(function (err) {
+        setMeta('Offline for ' + minutesDown() + ' · last error: ' + (err && err.message ? err.message : 'unreachable'));
+        schedule();
+      });
+  }
+
+  // Backoff, capped. A panel that has been down for hours must not hammer a server that is
+  // coming back up — every player on the site would hit it at once.
+  function schedule() {
+    var delay = attempt < 3 ? 5000 : (attempt < 10 ? 15000 : 60000);
+    setTimeout(probe, delay);
+  }
+
+  probe();
+})();
+</script>
+</body>
+</html>

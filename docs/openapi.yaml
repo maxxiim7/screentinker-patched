@@ -1,0 +1,2366 @@
+openapi: 3.1.0
+info:
+  title: ScreenTinker Public API
+  version: 2.0.4
+  description: |
+    Public, token-scoped REST API for ScreenTinker digital signage.
+
+    ## Authentication
+    Every endpoint (except the two unauthenticated device-render endpoints) accepts a
+    **scoped personal access token** presented as `Authorization: Bearer st_...`. The
+    dashboard's session JWT is also accepted, but this contract targets token consumers.
+
+    ## Scope ladder (read &#60; write &#60; full)
+    Tokens carry one of three scopes; higher scopes subsume lower ones:
+    - `read`  — all `GET` endpoints.
+    - `write` — all resource mutations (`POST` / `PUT` / `PATCH` / `DELETE`).
+    - `full`  — operational fleet commands (currently only
+      `POST /groups/{id}/command`: reboot / shutdown / screen on/off).
+
+    Each operation advertises its minimum scope via the `x-required-scope` extension
+    and restates it in the operation description. A token with insufficient scope is
+    rejected with `403`.
+
+    All resources are scoped to the token's workspace; cross-workspace access is not
+    available to tokens.
+servers:
+  - url: /api
+
+tags:
+  - name: content
+    description: Media library items (uploads, remote URLs, YouTube).
+  - name: folders
+    description: Content folder hierarchy.
+  - name: playlists
+    description: Playlists and their items / per-item schedules.
+  - name: assignments
+    description: Device playlist items (per-device assignment helpers).
+  - name: devices
+    description: Registered display devices.
+  - name: layouts
+    description: Multi-zone screen layouts and zones.
+  - name: groups
+    description: Device groups and bulk operations.
+  - name: schedules
+    description: Time-based content scheduling.
+  - name: walls
+    description: Video walls (multi-device grids).
+  - name: reports
+    description: Proof-of-play and uptime reporting.
+  - name: widgets
+    description: Dynamic widgets (clock, weather, RSS, etc.) and their render output.
+  - name: activity
+    description: Activity log.
+  - name: kiosk
+    description: Interactive kiosk pages and their render output.
+  - name: pip
+    description: Picture-in-picture / overlay push (image or web on top of the running playlist).
+
+security:
+  - ApiToken: []
+  - SessionJWT: []
+
+components:
+  securitySchemes:
+    ApiToken:
+      type: http
+      scheme: bearer
+      bearerFormat: "st_<token>"
+      description: |
+        Scoped personal access token. Send as `Authorization: Bearer st_...`.
+        The token's scope (`read`, `write`, or `full`) gates which operations
+        it may call (see the scope ladder in the API description).
+    SessionJWT:
+      type: http
+      scheme: bearer
+      description: |
+        Dashboard session JWT. Also accepted on every authenticated endpoint,
+        but this spec targets scoped-token consumers.
+
+  schemas:
+    Error:
+      type: object
+      properties:
+        error:
+          type: string
+
+    DeckDocument:
+      type: object
+      description: |
+        The editable source for a deck. Each slide carries a **template** (the view: element
+        geometry, style and motion, each with a `slot` name) and **fields** (the record: `{slot:
+        value}`). They are joined when the slide is rendered, which is what makes it possible to
+        come back and change a headline without rebuilding the layout.
+      properties:
+        slides:
+          type: array
+          maxItems: 100
+          items:
+            type: object
+            properties:
+              id:
+                type: string
+                description: 'Unique within the deck — it is how a republish finds the widget it already made.'
+              name: { type: string, maxLength: 120 }
+              dwell_sec:
+                type: integer
+                minimum: 1
+                maximum: 3600
+                default: 10
+                description: |
+                  How long the slide stays up. A slide's motion has to finish inside this; if it
+                  does not, save and publish both return a `motion-outlives-dwell` warning naming
+                  the slide. Warned rather than refused.
+              widget_id:
+                type: [string, 'null']
+                description: 'Assigned by publish. Present so a republish updates rather than duplicates.'
+              template:
+                type: object
+                properties:
+                  background: { type: string, description: 'Hex colour. Anything else falls back to black.' }
+                  elements:
+                    type: array
+                    maxItems: 40
+                    items:
+                      type: object
+                      properties:
+                        slot: { type: string, description: 'The key this element reads from fields.' }
+                        kind: { type: string, enum: [head, body, stat, image, rule, box] }
+                        box:
+                          type: object
+                          properties:
+                            x: { type: number }
+                            y: { type: number }
+                            w: { type: number }
+                            h: { type: number }
+                        content_id: { type: [string, 'null'], description: 'For an image — a content row in this workspace.' }
+                        style:
+                          type: object
+                          properties:
+                            color: { type: string, description: 'Hex. Anything else falls back to white.' }
+                            font:
+                              type: string
+                              description: |
+                                A bundled family (`inter`, `archivo`, `oswald`, `bitter`,
+                                `jetbrains-mono`), an uploaded one (`u:<uuid>`), or one of the
+                                legacy generics (`sans`, `serif`, `mono`, `condensed`) which still
+                                resolve.
+                            size_cqw:
+                              type: number
+                              description: 'Relative to the screen, never pixels — so a slide scales from 720p to 4K.'
+                            weight: { type: integer, minimum: 100, maximum: 900 }
+                            align: { type: string, enum: [left, center, right] }
+                            opacity: { type: number, minimum: 0, maximum: 1 }
+                            radius_cqw: { type: number }
+                        motion:
+                          type: [object, 'null']
+                          description: 'Null means the element is simply present from the first frame.'
+                          properties:
+                            animation: { type: string, enum: [fade, slideL, slideR, slideU, slideD, zoom, wipe] }
+                            delay: { type: number, minimum: 0, maximum: 30 }
+                            duration: { type: number, minimum: 0.05, maximum: 10 }
+                            easing: { type: string, enum: [ease-out, ease-in, ease-in-out, linear, soft] }
+              fields:
+                type: object
+                description: 'The values, keyed by slot. Editing one of these does not touch the template.'
+                additionalProperties: { type: string }
+
+    TriggerInput:
+      type: object
+      required: [name, match_token, target_ref, mode]
+      properties:
+        name: { type: string, maxLength: 200 }
+        match_token:
+          type: string
+          description: |
+            The word that fires this trigger. Printable ASCII, no spaces, 1-64 characters — the UDP
+            payload is a single space-separated line (`ST1 <secret> <token>`), so a space would be
+            unparseable on arrival and a newline would let one datagram look like two messages.
+          pattern: '^[\x21-\x7E]{1,64}$'
+        clear_token:
+          type: [string, 'null']
+          description: Optional word that clears an `until_cleared` trigger. Same charset.
+          pattern: '^[\x21-\x7E]{1,64}$'
+        source_http: { type: boolean, default: true }
+        source_udp: { type: boolean, default: false }
+        target_kind:
+          type: string
+          enum: [playlist]
+          default: playlist
+          description: |
+            Only `playlist` is implemented. A URL target is designed and deliberately not built —
+            playlist items are library content and therefore pinnable for offline use, which is the
+            whole reason the target is a playlist.
+        target_ref:
+          type: string
+          description: |
+            A playlist id in this workspace. It must be published and every item must be pinnable
+            offline (no `remote_url`, no YouTube), both checked when you save.
+        mode:
+          type: string
+          enum: [once, until_cleared]
+        max_duration_sec: { type: integer, minimum: 0, maximum: 86400, default: 0 }
+        lease_sec:
+          type: [integer, 'null']
+          minimum: 5
+          maximum: 86400
+          description: |
+            For `until_cleared` only. A dead-man's timer: the overlay retires on its own if nothing
+            renews it, so a controller that dies mid-alarm cannot leave a screen stuck.
+        priority: { type: integer, minimum: -1000, maximum: 1000, default: 0 }
+        enabled: { type: boolean, default: true }
+        assignments:
+          type: array
+          description: Which screens this applies to. Every target must be in the same workspace.
+          items:
+            type: object
+            required: [target_type, target_id]
+            properties:
+              target_type: { type: string, enum: [device, group] }
+              target_id: { type: string }
+      description: |
+        Note on geometry: `position`, `width`, `height`, `opacity` and `border_radius` are accepted
+        and stored but are **not currently honoured** — every trigger renders fullscreen. They are
+        omitted here deliberately rather than documented as working.
+
+    Device:
+      type: object
+      properties:
+        id:
+          type: string
+        name:
+          type: string
+        status:
+          type: string
+        workspace_id:
+          type: [string, "null"]
+        playlist_id:
+          type: [string, "null"]
+        layout_id:
+          type: [string, "null"]
+          description: Assigned layout (null = fullscreen). Recently added.
+        timezone:
+          type: string
+        orientation:
+          type: string
+        notes:
+          type: string
+        created_at:
+          type: integer
+
+        # --- Network addresses -------------------------------------------------------------
+        # Two different addresses, easy to confuse, so both are spelled out. They answer
+        # different questions and either can be null.
+        ip_address:
+          type: [string, "null"]
+          description: |
+            The device's **public (WAN)** address as observed by the server when the player
+            connected — i.e. what the internet sees. Behind a reverse proxy this is taken from
+            the first `X-Forwarded-For` entry, otherwise the socket peer address. Every device
+            on one site normally shares this. Null until the device has connected at least once.
+        local_ip:
+          type: [string, "null"]
+          description: |
+            The device's **own IPv4 address on its local network** (e.g. `192.168.1.42`), as
+            reported by the player itself. This is the one to use to reach a panel directly on
+            site. Null on players that do not report it, where the platform withholds it, or on
+            a panel with no IPv4 address at all — see `local_ip6`.
+        local_ip6:
+          type: [string, "null"]
+          description: |
+            The device's **own IPv6 address on its local network**, reported alongside
+            `local_ip` rather than instead of it: a dual-stack panel has both and either may be
+            the one you need. Link-local addresses (`fe80::/10`) are deliberately excluded —
+            every interface has one and none can be reached without also knowing the zone
+            index, so this carries a global or unique-local address or nothing. Null on players
+            that do not report it and on IPv4-only panels.
+
+        # --- Latest telemetry --------------------------------------------------------------
+        # Flattened from the most recent telemetry report. All null for a device that has
+        # never reported, and for platforms that cannot supply a given metric — treat every
+        # field here as optional rather than assuming a web player reports what Android does.
+        wifi_ssid:
+          type: [string, "null"]
+          description: |
+            Wi-Fi network name, or null on a wired/unknown connection.
+
+            Special value `"permission"` means the device is on Wi-Fi but the operating system
+            withheld the name — on Android 10+ reading the SSID requires a location permission
+            that ScreenTinker only asks for if an operator opts in. Treat `"permission"` as
+            "connected, name unavailable", not as a network literally called that.
+        wifi_rssi:
+          type: [integer, "null"]
+          description: Signal strength in dBm (negative; closer to zero is stronger).
+        battery_level:
+          type: [integer, "null"]
+          description: Battery percentage 0-100, or null on mains-powered hardware.
+        battery_charging:
+          type: [integer, "null"]
+          description: 1 charging, 0 not charging, null unknown.
+        storage_free_mb:
+          type: [integer, "null"]
+        storage_total_mb:
+          type: [integer, "null"]
+        ram_free_mb:
+          type: [integer, "null"]
+        ram_total_mb:
+          type: [integer, "null"]
+        cpu_usage:
+          type: [number, "null"]
+          description: Recent CPU utilisation as a percentage, where the platform exposes it.
+        uptime_seconds:
+          type: [integer, "null"]
+          description: Seconds since the device booted.
+
+    Playlist:
+      type: object
+      properties:
+        id:
+          type: string
+        name:
+          type: string
+        description:
+          type: string
+        status:
+          type: string
+          description: draft | published
+        workspace_id:
+          type: [string, "null"]
+        item_count:
+          type: integer
+        display_count:
+          type: integer
+
+    PlaylistItem:
+      type: object
+      properties:
+        id:
+          type: integer
+        playlist_id:
+          type: string
+        content_id:
+          type: [string, "null"]
+        widget_id:
+          type: [string, "null"]
+        zone_id:
+          type: [string, "null"]
+          description: Optional layout-zone placement. Recently added.
+        sort_order:
+          type: integer
+        duration_sec:
+          type: integer
+
+    Content:
+      type: object
+      properties:
+        id:
+          type: string
+        filename:
+          type: string
+        mime_type:
+          type: string
+        file_size:
+          type: integer
+        duration_sec:
+          type: [number, "null"]
+        remote_url:
+          type: [string, "null"]
+        thumbnail_path:
+          type: [string, "null"]
+        folder_id:
+          type: [string, "null"]
+        workspace_id:
+          type: [string, "null"]
+
+    Layout:
+      type: object
+      properties:
+        id:
+          type: string
+        name:
+          type: string
+        width:
+          type: integer
+        height:
+          type: integer
+        is_template:
+          type: integer
+        workspace_id:
+          type: [string, "null"]
+        zones:
+          type: array
+          items:
+            $ref: '#/components/schemas/Zone'
+
+    Zone:
+      type: object
+      properties:
+        id:
+          type: string
+        layout_id:
+          type: string
+        name:
+          type: string
+        x_percent:
+          type: number
+        y_percent:
+          type: number
+        width_percent:
+          type: number
+        height_percent:
+          type: number
+        z_index:
+          type: integer
+        zone_type:
+          type: string
+        fit_mode:
+          type: string
+        background_color:
+          type: string
+
+    Widget:
+      type: object
+      properties:
+        id:
+          type: string
+        widget_type:
+          type: string
+          description: clock | weather | rss | text | webpage | social | directory-board | directory-search
+        name:
+          type: string
+        config:
+          type: object
+        workspace_id:
+          type: [string, "null"]
+
+    Group:
+      type: object
+      properties:
+        id:
+          type: string
+        name:
+          type: string
+        color:
+          type: string
+          description: "#RRGGBB"
+        playlist_id:
+          type: [string, "null"]
+        device_count:
+          type: integer
+        workspace_id:
+          type: [string, "null"]
+
+    Schedule:
+      type: object
+      properties:
+        id:
+          type: string
+        device_id:
+          type: [string, "null"]
+        group_id:
+          type: [string, "null"]
+        zone_id:
+          type: [string, "null"]
+        content_id:
+          type: [string, "null"]
+        widget_id:
+          type: [string, "null"]
+        layout_id:
+          type: [string, "null"]
+        playlist_id:
+          type: [string, "null"]
+        title:
+          type: string
+        start_time:
+          type: string
+        end_time:
+          type: string
+        timezone:
+          type: string
+        recurrence:
+          type: [string, "null"]
+        priority:
+          type: integer
+        enabled:
+          type: integer
+
+  parameters:
+    Limit:
+      name: limit
+      in: query
+      schema:
+        type: integer
+      description: Max rows to return.
+    Offset:
+      name: offset
+      in: query
+      schema:
+        type: integer
+      description: Row offset for pagination.
+
+paths:
+  # ------------------------------------------------------------------ content
+  /content:
+    get:
+      tags: [content]
+      summary: List content in the current workspace
+      description: 'Requires scope: read.'
+      x-required-scope: read
+      parameters:
+        - name: folder
+          in: query
+          schema: { type: string }
+        - name: folder_id
+          in: query
+          schema: { type: string }
+          description: '"root"/"" = root-level only; UUID = that folder.'
+        - $ref: '#/components/parameters/Limit'
+        - $ref: '#/components/parameters/Offset'
+      responses:
+        '200':
+          description: Array of content items.
+    post:
+      tags: [content]
+      summary: Upload a content file (multipart)
+      description: 'Requires scope: write.'
+      x-required-scope: write
+      requestBody:
+        content:
+          multipart/form-data:
+            schema:
+              type: object
+              properties:
+                file:
+                  type: string
+                  format: binary
+      responses:
+        '201': { description: Created content item. }
+  /content/folders:
+    get:
+      tags: [content]
+      summary: List distinct content folder names with counts
+      description: 'Requires scope: read.'
+      x-required-scope: read
+      responses:
+        '200':
+          description: 'Array of { folder, count }.'
+  /content/remote:
+    post:
+      tags: [content]
+      summary: Add a remote-URL content item
+      description: 'Requires scope: write. SSRF-gated (http/https, no internal hosts).'
+      x-required-scope: write
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [url]
+              properties:
+                url: { type: string }
+                name: { type: string }
+                mime_type: { type: string }
+      responses:
+        '201': { description: Created content item. }
+  /content/youtube:
+    post:
+      tags: [content]
+      summary: Add a YouTube video as content
+      description: 'Requires scope: write.'
+      x-required-scope: write
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [url]
+              properties:
+                url: { type: string }
+                name: { type: string }
+      responses:
+        '201': { description: Created content item. }
+  /content/{id}:
+    get:
+      tags: [content]
+      summary: Get content metadata
+      description: 'Requires scope: read.'
+      x-required-scope: read
+      parameters:
+        - { name: id, in: path, required: true, schema: { type: string } }
+      responses:
+        '200': { description: Content item. }
+        '404': { description: Not found. }
+    put:
+      tags: [content]
+      summary: Update content metadata
+      description: 'Requires scope: write.'
+      x-required-scope: write
+      parameters:
+        - { name: id, in: path, required: true, schema: { type: string } }
+      requestBody:
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                filename: { type: string }
+                mime_type: { type: string }
+                remote_url: { type: string }
+                folder: { type: string }
+                folder_id: { type: string }
+      responses:
+        '200': { description: Updated content item. }
+    delete:
+      tags: [content]
+      summary: Delete content
+      description: 'Requires scope: write.'
+      x-required-scope: write
+      parameters:
+        - { name: id, in: path, required: true, schema: { type: string } }
+      responses:
+        '200': { description: '{ success, affectedDevices }.' }
+  /content/{id}/replace:
+    put:
+      tags: [content]
+      summary: Replace the content file (multipart)
+      description: 'Requires scope: write.'
+      x-required-scope: write
+      parameters:
+        - { name: id, in: path, required: true, schema: { type: string } }
+      requestBody:
+        content:
+          multipart/form-data:
+            schema:
+              type: object
+              properties:
+                file: { type: string, format: binary }
+      responses:
+        '200': { description: Updated content item. }
+  /content/{id}/file:
+    get:
+      tags: [content]
+      summary: Download the content file
+      description: 'Requires scope: read.'
+      x-required-scope: read
+      parameters:
+        - { name: id, in: path, required: true, schema: { type: string } }
+      responses:
+        '200': { description: Binary file stream. }
+  /content/{id}/thumbnail:
+    get:
+      tags: [content]
+      summary: Download the content thumbnail
+      description: 'Requires scope: read.'
+      x-required-scope: read
+      parameters:
+        - { name: id, in: path, required: true, schema: { type: string } }
+      responses:
+        '200': { description: Binary image stream. }
+
+  # ------------------------------------------------------------------ folders
+  /folders:
+    get:
+      tags: [folders]
+      summary: List content folders in the current workspace
+      description: 'Requires scope: read.'
+      x-required-scope: read
+      responses:
+        '200': { description: Array of folders. }
+    post:
+      tags: [folders]
+      summary: Create a folder
+      description: 'Requires scope: write.'
+      x-required-scope: write
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [name]
+              properties:
+                name: { type: string }
+                parent_id: { type: string }
+      responses:
+        '201': { description: Created folder. }
+  /folders/{id}:
+    put:
+      tags: [folders]
+      summary: Rename or move a folder
+      description: 'Requires scope: write.'
+      x-required-scope: write
+      parameters:
+        - { name: id, in: path, required: true, schema: { type: string } }
+      requestBody:
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                name: { type: string }
+                parent_id: { type: [string, "null"] }
+      responses:
+        '200': { description: Updated folder. }
+    delete:
+      tags: [folders]
+      summary: Delete a folder
+      description: 'Requires scope: write.'
+      x-required-scope: write
+      parameters:
+        - { name: id, in: path, required: true, schema: { type: string } }
+      responses:
+        '200': { description: '{ success }.' }
+
+  # ---------------------------------------------------------------- playlists
+  /playlists:
+    get:
+      tags: [playlists]
+      summary: List playlists in the current workspace
+      description: 'Requires scope: read.'
+      x-required-scope: read
+      responses:
+        '200': { description: Array of playlists. }
+    post:
+      tags: [playlists]
+      summary: Create a playlist
+      description: 'Requires scope: write.'
+      x-required-scope: write
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [name]
+              properties:
+                name: { type: string }
+                description: { type: string }
+      responses:
+        '201': { description: Created playlist. }
+  /playlists/{id}:
+    get:
+      tags: [playlists]
+      summary: Get a playlist with its items
+      description: 'Requires scope: read.'
+      x-required-scope: read
+      parameters:
+        - { name: id, in: path, required: true, schema: { type: string } }
+      responses:
+        '200': { description: Playlist with items. }
+    put:
+      tags: [playlists]
+      summary: Update playlist name/description
+      description: 'Requires scope: write.'
+      x-required-scope: write
+      parameters:
+        - { name: id, in: path, required: true, schema: { type: string } }
+      requestBody:
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                name: { type: string }
+                description: { type: string }
+      responses:
+        '200': { description: Updated playlist. }
+    delete:
+      tags: [playlists]
+      summary: Delete a playlist
+      description: 'Requires scope: write.'
+      x-required-scope: write
+      parameters:
+        - { name: id, in: path, required: true, schema: { type: string } }
+      responses:
+        '200': { description: '{ success }.' }
+  /playlists/{id}/publish:
+    post:
+      tags: [playlists]
+      summary: Publish a playlist (snapshot + push to devices)
+      description: 'Requires scope: write.'
+      x-required-scope: write
+      parameters:
+        - { name: id, in: path, required: true, schema: { type: string } }
+      responses:
+        '200': { description: Published playlist with items. }
+  /playlists/{id}/discard:
+    post:
+      tags: [playlists]
+      summary: Discard draft changes (revert to published snapshot)
+      description: 'Requires scope: write.'
+      x-required-scope: write
+      parameters:
+        - { name: id, in: path, required: true, schema: { type: string } }
+      responses:
+        '200': { description: Reverted playlist with items. }
+  /playlists/{id}/items:
+    get:
+      tags: [playlists]
+      summary: List a playlist's items
+      description: 'Requires scope: read.'
+      x-required-scope: read
+      parameters:
+        - { name: id, in: path, required: true, schema: { type: string } }
+      responses:
+        '200': { description: Array of playlist items. }
+    post:
+      tags: [playlists]
+      summary: Add a content or widget item to a playlist
+      description: 'Requires scope: write.'
+      x-required-scope: write
+      parameters:
+        - { name: id, in: path, required: true, schema: { type: string } }
+      requestBody:
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                content_id: { type: string }
+                widget_id: { type: string }
+                zone_id: { type: string }
+                sort_order: { type: integer }
+                duration_sec:
+                  type: integer
+                  description: >
+                    Omit to let the server choose: video content defaults to the clip's own
+                    length (rounded up to a whole second), anything else to 10s.
+      responses:
+        '201': { description: Created playlist item. }
+  /playlists/{id}/items/reorder:
+    post:
+      tags: [playlists]
+      summary: Reorder playlist items
+      description: 'Requires scope: write.'
+      x-required-scope: write
+      parameters:
+        - { name: id, in: path, required: true, schema: { type: string } }
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [order]
+              properties:
+                order:
+                  type: array
+                  items: { type: integer }
+      responses:
+        '200': { description: Reordered items. }
+  /playlists/{id}/items/{itemId}:
+    put:
+      tags: [playlists]
+      summary: Update a playlist item
+      description: 'Requires scope: write.'
+      x-required-scope: write
+      parameters:
+        - { name: id, in: path, required: true, schema: { type: string } }
+        - { name: itemId, in: path, required: true, schema: { type: integer } }
+      requestBody:
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                sort_order: { type: integer }
+                duration_sec: { type: integer }
+                zone_id: { type: [string, "null"] }
+      responses:
+        '200': { description: Updated item. }
+    delete:
+      tags: [playlists]
+      summary: Delete a playlist item
+      description: 'Requires scope: write.'
+      x-required-scope: write
+      parameters:
+        - { name: id, in: path, required: true, schema: { type: string } }
+        - { name: itemId, in: path, required: true, schema: { type: integer } }
+      responses:
+        '200': { description: '{ success }.' }
+  /playlists/{id}/items/{itemId}/schedules:
+    get:
+      tags: [playlists]
+      summary: Get a playlist item's schedule blocks
+      description: 'Requires scope: read.'
+      x-required-scope: read
+      parameters:
+        - { name: id, in: path, required: true, schema: { type: string } }
+        - { name: itemId, in: path, required: true, schema: { type: integer } }
+      responses:
+        '200': { description: Array of schedule blocks. }
+    put:
+      tags: [playlists]
+      summary: Replace a playlist item's schedule blocks
+      description: 'Requires scope: write.'
+      x-required-scope: write
+      parameters:
+        - { name: id, in: path, required: true, schema: { type: string } }
+        - { name: itemId, in: path, required: true, schema: { type: integer } }
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [blocks]
+              properties:
+                blocks:
+                  type: array
+                  items:
+                    type: object
+                    properties:
+                      days:
+                        type: array
+                        items: { type: integer }
+                      start: { type: string }
+                      end: { type: string }
+                      start_date: { type: [string, "null"] }
+                      end_date: { type: [string, "null"] }
+      responses:
+        '200': { description: Stored schedule blocks. }
+  /playlists/{id}/assign:
+    post:
+      tags: [playlists]
+      summary: Assign the playlist to a device
+      description: 'Requires scope: write.'
+      x-required-scope: write
+      parameters:
+        - { name: id, in: path, required: true, schema: { type: string } }
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [device_id]
+              properties:
+                device_id: { type: string }
+      responses:
+        '200': { description: '{ success }.' }
+
+  # -------------------------------------------------------------- assignments
+  /assignments/device/{deviceId}:
+    get:
+      tags: [assignments]
+      summary: List a device's playlist items
+      description: 'Requires scope: read.'
+      x-required-scope: read
+      parameters:
+        - { name: deviceId, in: path, required: true, schema: { type: string } }
+      responses:
+        '200': { description: Array of items. }
+    post:
+      tags: [assignments]
+      summary: Add a content/widget item to a device's playlist
+      description: 'Requires scope: write.'
+      x-required-scope: write
+      parameters:
+        - { name: deviceId, in: path, required: true, schema: { type: string } }
+      requestBody:
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                content_id: { type: string }
+                widget_id: { type: string }
+                zone_id: { type: string }
+                duration_sec:
+                  type: integer
+                  description: >
+                    Omit to let the server choose: video content defaults to the clip's own
+                    length (rounded up to a whole second), anything else to 10s.
+                sort_order: { type: integer }
+      responses:
+        '201': { description: Created item. }
+  /assignments/device/{deviceId}/reorder:
+    post:
+      tags: [assignments]
+      summary: Reorder a device's playlist items
+      description: 'Requires scope: write.'
+      x-required-scope: write
+      parameters:
+        - { name: deviceId, in: path, required: true, schema: { type: string } }
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [order]
+              properties:
+                order:
+                  type: array
+                  items: { type: integer }
+      responses:
+        '200': { description: Reordered items. }
+  /assignments/device/{deviceId}/copy-to/{targetDeviceId}:
+    post:
+      tags: [assignments]
+      summary: Copy a device's playlist to another device
+      description: 'Requires scope: write. Both devices must share a workspace.'
+      x-required-scope: write
+      parameters:
+        - { name: deviceId, in: path, required: true, schema: { type: string } }
+        - { name: targetDeviceId, in: path, required: true, schema: { type: string } }
+      requestBody:
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                replace: { type: boolean }
+      responses:
+        '200': { description: '{ success, copied }.' }
+  /assignments/{id}:
+    put:
+      tags: [assignments]
+      summary: Update a playlist item
+      description: 'Requires scope: write.'
+      x-required-scope: write
+      parameters:
+        - { name: id, in: path, required: true, schema: { type: integer } }
+      requestBody:
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                sort_order: { type: integer }
+                duration_sec: { type: integer }
+                zone_id: { type: [string, "null"] }
+                muted:
+                  type: boolean
+                  description: >
+                    Mute this item's audio. Applied to playing devices in real time
+                    (device:mute-changed) and persisted into the published snapshot, so it
+                    also takes effect on the next playlist load. (#129)
+      responses:
+        '200': { description: Updated item. }
+    delete:
+      tags: [assignments]
+      summary: Delete a playlist item
+      description: 'Requires scope: write.'
+      x-required-scope: write
+      parameters:
+        - { name: id, in: path, required: true, schema: { type: integer } }
+      responses:
+        '200': { description: '{ success, content_id }.' }
+
+  # ------------------------------------------------------------------ devices
+  /devices:
+    get:
+      tags: [devices]
+      summary: List devices in the current workspace
+      description: 'Requires scope: read.'
+      x-required-scope: read
+      parameters:
+        - $ref: '#/components/parameters/Limit'
+        - $ref: '#/components/parameters/Offset'
+      responses:
+        '200':
+          description: Array of devices.
+          content:
+            application/json:
+              schema:
+                type: array
+                items: { $ref: '#/components/schemas/Device' }
+  /devices/{id}:
+    get:
+      tags: [devices]
+      summary: Get a device with telemetry and assignments
+      description: 'Requires scope: read.'
+      x-required-scope: read
+      parameters:
+        - { name: id, in: path, required: true, schema: { type: string } }
+      responses:
+        '200':
+          description: Device detail.
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Device' }
+        '404': { description: Not found. }
+    put:
+      tags: [devices]
+      summary: Update a device
+      description: 'Requires scope: write.'
+      x-required-scope: write
+      parameters:
+        - { name: id, in: path, required: true, schema: { type: string } }
+      requestBody:
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                name: { type: string }
+                notes: { type: string }
+                timezone: { type: string }
+                orientation: { type: string }
+                default_content_id: { type: string }
+                layout_id: { type: [string, "null"] }
+      responses:
+        '200':
+          description: Updated device.
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Device' }
+    delete:
+      tags: [devices]
+      summary: Delete a device
+      description: 'Requires scope: write.'
+      x-required-scope: write
+      parameters:
+        - { name: id, in: path, required: true, schema: { type: string } }
+      responses:
+        '200': { description: '{ success }.' }
+
+  # ------------------------------------------------------------------ layouts
+  /layouts:
+    get:
+      tags: [layouts]
+      summary: List layouts (workspace + templates)
+      description: 'Requires scope: read.'
+      x-required-scope: read
+      parameters:
+        - name: templates
+          in: query
+          schema: { type: string }
+          description: '"true" to list only templates.'
+      responses:
+        '200':
+          description: Array of layouts with zones.
+    post:
+      tags: [layouts]
+      summary: Create a layout
+      description: 'Requires scope: write.'
+      x-required-scope: write
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [name]
+              properties:
+                name: { type: string }
+                width: { type: integer }
+                height: { type: integer }
+                zones:
+                  type: array
+                  items: { $ref: '#/components/schemas/Zone' }
+      responses:
+        '201':
+          description: Created layout.
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Layout' }
+  /layouts/{id}:
+    get:
+      tags: [layouts]
+      summary: Get a layout with zones
+      description: 'Requires scope: read.'
+      x-required-scope: read
+      parameters:
+        - { name: id, in: path, required: true, schema: { type: string } }
+      responses:
+        '200':
+          description: Layout with zones.
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Layout' }
+    put:
+      tags: [layouts]
+      summary: Update a layout (and optionally replace zones)
+      description: 'Requires scope: write.'
+      x-required-scope: write
+      parameters:
+        - { name: id, in: path, required: true, schema: { type: string } }
+      requestBody:
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                name: { type: string }
+                width: { type: integer }
+                height: { type: integer }
+                zones:
+                  type: array
+                  items: { $ref: '#/components/schemas/Zone' }
+      responses:
+        '200': { description: Updated layout. }
+    delete:
+      tags: [layouts]
+      summary: Delete a layout
+      description: 'Requires scope: write.'
+      x-required-scope: write
+      parameters:
+        - { name: id, in: path, required: true, schema: { type: string } }
+      responses:
+        '200': { description: '{ success }.' }
+  /layouts/{id}/zones:
+    post:
+      tags: [layouts]
+      summary: Add a zone to a layout
+      description: 'Requires scope: write.'
+      x-required-scope: write
+      parameters:
+        - { name: id, in: path, required: true, schema: { type: string } }
+      requestBody:
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/Zone' }
+      responses:
+        '201':
+          description: Created zone.
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Zone' }
+  /layouts/{id}/zones/{zoneId}:
+    put:
+      tags: [layouts]
+      summary: Update a zone
+      description: 'Requires scope: write.'
+      x-required-scope: write
+      parameters:
+        - { name: id, in: path, required: true, schema: { type: string } }
+        - { name: zoneId, in: path, required: true, schema: { type: string } }
+      requestBody:
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/Zone' }
+      responses:
+        '200': { description: Updated zone. }
+    delete:
+      tags: [layouts]
+      summary: Delete a zone
+      description: 'Requires scope: write.'
+      x-required-scope: write
+      parameters:
+        - { name: id, in: path, required: true, schema: { type: string } }
+        - { name: zoneId, in: path, required: true, schema: { type: string } }
+      responses:
+        '200': { description: '{ success }.' }
+  /layouts/{id}/duplicate:
+    post:
+      tags: [layouts]
+      summary: Duplicate a layout into the current workspace
+      description: 'Requires scope: write.'
+      x-required-scope: write
+      parameters:
+        - { name: id, in: path, required: true, schema: { type: string } }
+      requestBody:
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                name: { type: string }
+      responses:
+        '201': { description: Duplicated layout. }
+  /layouts/device/{deviceId}:
+    put:
+      tags: [layouts]
+      summary: Assign a layout to a device
+      description: 'Requires scope: write.'
+      x-required-scope: write
+      parameters:
+        - { name: deviceId, in: path, required: true, schema: { type: string } }
+      requestBody:
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                layout_id: { type: [string, "null"] }
+      responses:
+        '200': { description: '{ success }.' }
+
+  # ------------------------------------------------------------------- groups
+  /groups:
+    get:
+      tags: [groups]
+      summary: List device groups in the current workspace
+      description: 'Requires scope: read.'
+      x-required-scope: read
+      responses:
+        '200':
+          description: Array of groups.
+          content:
+            application/json:
+              schema:
+                type: array
+                items: { $ref: '#/components/schemas/Group' }
+    post:
+      tags: [groups]
+      summary: Create a device group
+      description: 'Requires scope: write.'
+      x-required-scope: write
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [name]
+              properties:
+                name: { type: string }
+                color: { type: string }
+      responses:
+        '201':
+          description: Created group.
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Group' }
+  /groups/{id}:
+    put:
+      tags: [groups]
+      summary: Update a group
+      description: 'Requires scope: write.'
+      x-required-scope: write
+      parameters:
+        - { name: id, in: path, required: true, schema: { type: string } }
+      requestBody:
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                name: { type: string }
+                color: { type: string }
+      responses:
+        '200': { description: Updated group. }
+    delete:
+      tags: [groups]
+      summary: Delete a group (converts group schedules to per-device)
+      description: 'Requires scope: write.'
+      x-required-scope: write
+      parameters:
+        - { name: id, in: path, required: true, schema: { type: string } }
+      responses:
+        '200': { description: '{ success, schedules_converted, devices }.' }
+  /groups/{id}/devices:
+    get:
+      tags: [groups]
+      summary: List devices in a group
+      description: 'Requires scope: read.'
+      x-required-scope: read
+      parameters:
+        - { name: id, in: path, required: true, schema: { type: string } }
+      responses:
+        '200': { description: Array of devices. }
+    post:
+      tags: [groups]
+      summary: Add a device to a group
+      description: 'Requires scope: write.'
+      x-required-scope: write
+      parameters:
+        - { name: id, in: path, required: true, schema: { type: string } }
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [device_id]
+              properties:
+                device_id: { type: string }
+      responses:
+        '201': { description: '{ success, playlist_id }.' }
+  /groups/{id}/devices/{deviceId}:
+    delete:
+      tags: [groups]
+      summary: Remove a device from a group
+      description: 'Requires scope: write.'
+      x-required-scope: write
+      parameters:
+        - { name: id, in: path, required: true, schema: { type: string } }
+        - { name: deviceId, in: path, required: true, schema: { type: string } }
+      responses:
+        '200': { description: '{ success }.' }
+  /groups/{id}/assign-content:
+    post:
+      tags: [groups]
+      summary: Add content to every device in a group
+      description: 'Requires scope: write.'
+      x-required-scope: write
+      parameters:
+        - { name: id, in: path, required: true, schema: { type: string } }
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [content_id]
+              properties:
+                content_id: { type: string }
+                duration_sec:
+                  type: integer
+                  description: >
+                    Omit to let the server choose: video content defaults to the clip's own
+                    length (rounded up to a whole second), anything else to 10s.
+      responses:
+        '200': { description: '{ success, devices_updated }.' }
+  /groups/{id}/assign-playlist:
+    post:
+      tags: [groups]
+      summary: Assign a playlist to every device in a group
+      description: 'Requires scope: write.'
+      x-required-scope: write
+      parameters:
+        - { name: id, in: path, required: true, schema: { type: string } }
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [playlist_id]
+              properties:
+                playlist_id: { type: string }
+      responses:
+        '200': { description: '{ success, devices_updated }.' }
+  /groups/{id}/command:
+    post:
+      tags: [groups]
+      summary: Send an operational command to every device in a group
+      description: |
+        Sends reboot / shutdown / screen on/off / launch / update to all devices
+        in the group. Requires scope: full (the highest scope; tokens with only
+        read or write are rejected).
+      x-required-scope: full
+      parameters:
+        - { name: id, in: path, required: true, schema: { type: string } }
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [type]
+              properties:
+                type:
+                  type: string
+                  # Kept identical to server/lib/device-command.js ALLOWED_COMMANDS, which both the
+                  # group and the single-device route validate against. openapi-contract.test.js
+                  # asserts the two lists match: this one had already drifted, documenting six of
+                  # the commands a 'full' token can actually send.
+                  enum: [screen_on, screen_off, launch, update, reboot, shutdown,
+                         power_menu, lock_now, kiosk_lock, kiosk_unlock,
+                         set_time, set_timezone, status_bar, block_uninstall, unblock_uninstall,
+                         shell, install_apk,
+                         set_volume, set_brightness, set_system_brightness, set_screen_timeout]
+                payload: { type: object }
+      responses:
+        '200': { description: '{ success, sent, offline, total, results }.' }
+
+  /devices/{id}/command:
+    post:
+      tags: [devices]
+      summary: Send an operational command to one screen
+      description: |
+        Sends reboot / shutdown / screen on/off / launch / update — and the device-owner and
+        system-control commands — to a single display. The group equivalent
+        (`POST /groups/{id}/command`) has existed far longer; this route did not, so commanding one
+        screen was reachable only over the dashboard's websocket and not over the API at all.
+
+        Requires scope: full (the highest scope; read and write tokens are rejected), the same as
+        the group route — a fleet-affecting action is not an ordinary write.
+
+        A panel that does not support the command is answered `400` with a `capability` field
+        naming what it lacks, rather than a generic failure: "this screen cannot do that" is
+        actionable and "failed" is not. The `status` in a success response says whether the panel
+        actually received it or the command was queued for a device that is currently offline.
+      x-required-scope: full
+      parameters:
+        - { name: id, in: path, required: true, schema: { type: string } }
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [type]
+              properties:
+                type:
+                  type: string
+                  # Same list as the group route above; see the note there.
+                  enum: [screen_on, screen_off, launch, update, reboot, shutdown,
+                         power_menu, lock_now, kiosk_lock, kiosk_unlock,
+                         set_time, set_timezone, status_bar, block_uninstall, unblock_uninstall,
+                         shell, install_apk,
+                         set_volume, set_brightness, set_system_brightness, set_screen_timeout]
+                payload: { type: object }
+      responses:
+        '200':
+          description: '{ success, status, device_id }.'
+        '400':
+          description: |
+            Unknown command type, or the panel does not support it — in which case the body carries
+            `capability` naming the missing one.
+        '404': { description: No such device in this workspace. }
+        '503': { description: The realtime layer is not available. }
+
+  # --------------------------------------------------------------- slide decks
+  /slide-decks:
+    get:
+      tags: [slides]
+      summary: List the slide decks in this workspace
+      description: |
+        A deck is the editable source document for a set of slides. Publishing one emits a playlist
+        of slide widgets — so decks take no part in playback, and everything downstream
+        (scheduling, groups, device assignment) works on the playlist, not on this.
+      x-required-scope: read
+      responses:
+        '200': { description: 'An array of decks with slide counts and total duration.' }
+    post:
+      tags: [slides]
+      summary: Create a deck
+      x-required-scope: write
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [name]
+              properties:
+                name: { type: string, maxLength: 120 }
+                doc: { $ref: '#/components/schemas/DeckDocument' }
+      responses:
+        '201': { description: 'The created deck, with any publish warnings.' }
+        '400': { description: 'A deck needs a name.' }
+
+  /slide-decks/{id}:
+    get:
+      tags: [slides]
+      summary: Fetch a deck document
+      x-required-scope: read
+      parameters:
+        - { name: id, in: path, required: true, schema: { type: string } }
+      responses:
+        '200': { description: 'The deck, its document, and its warnings.' }
+        '404': { description: 'No such deck in this workspace.' }
+    put:
+      tags: [slides]
+      summary: Save a deck document
+      description: |
+        Saving is **not** publishing — nothing reaches a screen until you publish. Warnings come
+        back on every save so an editor can show a problem while somebody works, rather than
+        refusing the change.
+      x-required-scope: write
+      parameters:
+        - { name: id, in: path, required: true, schema: { type: string } }
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                name: { type: string, maxLength: 120 }
+                doc: { $ref: '#/components/schemas/DeckDocument' }
+      responses:
+        '200': { description: 'The saved deck.' }
+        '404': { description: 'No such deck in this workspace.' }
+    delete:
+      tags: [slides]
+      summary: Delete a deck document
+      description: |
+        **The published playlist and its widgets are kept.** By the time a deck has been published
+        what is on the wall is a playlist, possibly assigned to devices or on a schedule — deleting
+        the document must not take those down with it. Pass `with_published=1` to remove them too,
+        which still refuses to delete a widget another playlist is playing.
+      x-required-scope: write
+      parameters:
+        - { name: id, in: path, required: true, schema: { type: string } }
+        - name: with_published
+          in: query
+          required: false
+          schema: { type: string, enum: ['1', 'true'] }
+          description: 'Also remove the slide widgets this deck published.'
+      responses:
+        '200': { description: '{ success, removed_widgets, playlist_kept }.' }
+        '404': { description: 'No such deck in this workspace.' }
+
+  /slide-decks/{id}/publish:
+    post:
+      tags: [slides]
+      summary: Publish a deck to a playlist of slide widgets
+      description: |
+        Creates or updates one slide widget per page and a playlist that orders them, then publishes
+        that playlist. Republishing updates the same widgets rather than making new ones, and a
+        slide removed from the deck has its widget deleted — unless another playlist still plays it,
+        in which case it is only unlinked.
+      x-required-scope: write
+      parameters:
+        - { name: id, in: path, required: true, schema: { type: string } }
+      responses:
+        '200': { description: 'The deck, plus published.playlist_id, published.slides and published.removed.' }
+        '404': { description: 'No such deck in this workspace.' }
+        '500': { description: 'The deck could not be published.' }
+
+  # -------------------------------------------------------------- slide fonts
+  /fonts:
+    get:
+      tags: [slides]
+      summary: List the fonts uploaded to this workspace
+      description: |
+        Fonts an operator uploaded, for setting slides in a brand face. The five bundled families
+        are not listed here — they ship with the server and need no upload.
+      x-required-scope: read
+      responses:
+        '200': { description: 'An array of uploaded fonts.' }
+    post:
+      tags: [slides]
+      summary: Upload a font
+      description: |
+        Multipart, field name `font`. Accepts `.woff2`, `.woff`, `.ttf` and `.otf`, identified by
+        magic bytes rather than by filename, up to 12 MB.
+
+        The response `id` is what a slide stores in its element style, in the form `u:<uuid>`.
+
+        Two things worth knowing before uploading. **This server redistributes the file**: every
+        screen showing a slide in that face downloads it, from a URL that cannot be authenticated
+        (the slide renders in an opaque-origin iframe carrying no credentials) — so it is
+        unguessable rather than secret, the same property uploaded images already have. And
+        `licence_note` is recorded against the font and shown beside it, so the question of where a
+        face came from has an answer later.
+      x-required-scope: write
+      requestBody:
+        required: true
+        content:
+          multipart/form-data:
+            schema:
+              type: object
+              required: [font]
+              properties:
+                font: { type: string, format: binary }
+                name: { type: string, maxLength: 80 }
+                licence_note: { type: string, maxLength: 300 }
+      responses:
+        '201': { description: 'The stored font, including the u:<uuid> a slide references it by.' }
+        '400': { description: 'Not a font, a TrueType Collection, empty, or over the size limit. The message says which.' }
+        '403': { description: 'No workspace context.' }
+
+  /fonts/{id}:
+    delete:
+      tags: [slides]
+      summary: Delete an uploaded font
+      description: |
+        Slides using it keep rendering — they fall back to the default bundled family, whose
+        `@font-face` is emitted alongside so the fallback actually loads. Takes the raw uuid, not
+        the `u:` form.
+      x-required-scope: write
+      parameters:
+        - { name: id, in: path, required: true, schema: { type: string } }
+      responses:
+        '200': { description: '{ success: true }.' }
+        '403': { description: 'That font belongs to another workspace.' }
+        '404': { description: 'No such font.' }
+
+  # ----------------------------------------------------------------- triggers
+  /triggers:
+    get:
+      tags: [triggers]
+      summary: List the triggers in this workspace
+      description: |
+        A trigger lets an external system interrupt a screen's playlist with different content, in
+        response to an event fired at the player over the LAN — an HTTP POST or a UDP datagram. It
+        is resolved entirely on the device, so it still works with the WAN down.
+      x-required-scope: read
+      responses:
+        '200': { description: 'An array of triggers, each with its `assignments`.' }
+    post:
+      tags: [triggers]
+      summary: Create a trigger
+      description: |
+        Requires scope: full. A trigger changes what a screen shows in response to a packet that is
+        not itself authenticated by this API, so it is a fleet-affecting capability rather than
+        ordinary content editing — the same tier as a reboot.
+
+        The target playlist must be **published** and every item in it must be locally pinnable
+        (no `remote_url`, no YouTube). Both are refused at save time rather than at fire time: a
+        trigger that saves cleanly and then renders nothing during an alarm is the failure this
+        feature exists to prevent.
+      x-required-scope: full
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/TriggerInput' }
+      responses:
+        '200': { description: 'The created trigger, with its assignments.' }
+        '400':
+          description: |
+            Validation failed — an unusable token, an unpublished or empty target playlist, an item
+            that cannot be cached offline, or an assignment naming a device outside this workspace.
+            The message says which.
+
+  /triggers/{id}:
+    get:
+      tags: [triggers]
+      summary: Fetch one trigger
+      x-required-scope: read
+      parameters:
+        - { name: id, in: path, required: true, schema: { type: string } }
+      responses:
+        '200': { description: 'The trigger, with its assignments.' }
+        '404': { description: No such trigger in this workspace. }
+    put:
+      tags: [triggers]
+      summary: Update a trigger
+      description: 'Requires scope: full, and revalidates everything POST does.'
+      x-required-scope: full
+      parameters:
+        - { name: id, in: path, required: true, schema: { type: string } }
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/TriggerInput' }
+      responses:
+        '200': { description: The updated trigger. }
+        '400': { description: Validation failed; the message says which rule. }
+        '404': { description: No such trigger in this workspace. }
+    delete:
+      tags: [triggers]
+      summary: Delete a trigger
+      x-required-scope: full
+      parameters:
+        - { name: id, in: path, required: true, schema: { type: string } }
+      responses:
+        '200': { description: '{ success: true }.' }
+        '404': { description: No such trigger in this workspace. }
+
+  /devices/{id}/trigger-config:
+    post:
+      tags: [triggers]
+      summary: Configure how one screen listens for triggers
+      description: |
+        Which transports a player accepts (`accept_http`, `accept_udp`), which ports it binds, and
+        the multicast group it joins. Ports must be 1024-65534 — below 1024 needs root on every
+        platform ScreenTinker runs on.
+      x-required-scope: full
+      parameters:
+        - { name: id, in: path, required: true, schema: { type: string } }
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                accept_http: { type: boolean }
+                accept_udp: { type: boolean }
+                http_port: { type: [integer, 'null'], minimum: 1024, maximum: 65534 }
+                udp_port: { type: [integer, 'null'], minimum: 1024, maximum: 65534 }
+                multicast_group: { type: [string, 'null'] }
+      responses:
+        '200': { description: The updated trigger configuration for that device. }
+        '400': { description: 'A port outside 1024-65534, or an unusable multicast group.' }
+        '404': { description: No such device in this workspace. }
+
+  /devices/{id}/trigger-secret:
+    post:
+      tags: [triggers]
+      summary: Rotate or set the shared secret a screen requires
+      description: |
+        The secret an external system must present in the payload (`ST1 <secret> <token>`). The
+        response says whether the panel actually received the new value rather than implying it —
+        a screen that is offline when you rotate is still expecting the old one.
+      x-required-scope: full
+      parameters:
+        - { name: id, in: path, required: true, schema: { type: string } }
+      responses:
+        '200': { description: 'The secret, and whether the device was reached.' }
+        '404': { description: No such device in this workspace. }
+
+  # ---------------------------------------------------------------------- pip
+  /pip:
+    post:
+      tags: [pip]
+      summary: Show a picture-in-picture overlay on a device or group
+      description: |
+        Pushes an image or web overlay onto a device (or every device in a group) on top
+        of the running playlist, in real time (device:pip-show). The player fetches `uri`
+        itself (same trust model as remote_url content; the server does not proxy it). A
+        `web` overlay renders an arbitrary page in an iframe, so this requires scope: full. (#109)
+      x-required-scope: full
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [device_id, type, uri]
+              properties:
+                device_id: { type: string, description: A device id OR a group id (expanded to its members). }
+                type: { type: string, enum: [image, web] }
+                uri: { type: string, description: Absolute http(s) URL the player fetches directly. }
+                position: { type: string, enum: [top-left, top-right, bottom-left, bottom-right, center], default: top-right }
+                width: { type: integer, description: 'px (40-3840)', default: 480 }
+                height: { type: integer, description: 'px (40-3840)', default: 360 }
+                duration: { type: integer, description: 'seconds; 0 = until cleared (0-86400)', default: 0 }
+                title: { type: string }
+                title_color: { type: string, description: '#RRGGBB' }
+                background_color: { type: string, description: '#RRGGBB (transparency via opacity)' }
+                opacity: { type: number, description: '0-1', default: 1 }
+                border_radius: { type: integer, description: 'px (0-512)', default: 0 }
+                close_button: { type: boolean }
+      responses:
+        '200': { description: '{ success, pip_id, target, sent, offline, total, results }.' }
+        '400': { description: Validation error (type / uri scheme / position / numeric bounds / color). }
+        '404': { description: Device or group not found in this workspace. }
+    delete:
+      tags: [pip]
+      summary: Clear a picture-in-picture overlay
+      description: 'Clears the overlay on a device or group (device:pip-clear). Requires scope: full. (#109)'
+      x-required-scope: full
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [device_id]
+              properties:
+                device_id: { type: string, description: A device id OR a group id. }
+                pip_id: { type: string, description: Omit to clear whatever overlay is showing. }
+      responses:
+        '200': { description: '{ success, target, sent, offline, total, results }.' }
+        '404': { description: Device or group not found in this workspace. }
+  /pip/clear:
+    post:
+      tags: [pip]
+      summary: Clear a picture-in-picture overlay (alias for DELETE /pip)
+      description: 'Same as DELETE /pip; provided for clients that prefer POST. Requires scope: full. (#109)'
+      x-required-scope: full
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [device_id]
+              properties:
+                device_id: { type: string, description: A device id OR a group id. }
+                pip_id: { type: string, description: Omit to clear whatever overlay is showing. }
+      responses:
+        '200': { description: '{ success, target, sent, offline, total, results }.' }
+        '404': { description: Device or group not found in this workspace. }
+
+  # ---------------------------------------------------------------- schedules
+  /schedules:
+    get:
+      tags: [schedules]
+      summary: List schedules (filterable)
+      description: 'Requires scope: read.'
+      x-required-scope: read
+      parameters:
+        - { name: device_id, in: query, schema: { type: string } }
+        - { name: group_id, in: query, schema: { type: string } }
+        - { name: start, in: query, schema: { type: string } }
+        - { name: end, in: query, schema: { type: string } }
+      responses:
+        '200':
+          description: Array of schedules.
+          content:
+            application/json:
+              schema:
+                type: array
+                items: { $ref: '#/components/schemas/Schedule' }
+    post:
+      tags: [schedules]
+      summary: Create a schedule (targets one device OR one group)
+      description: 'Requires scope: write.'
+      x-required-scope: write
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [start_time, end_time]
+              properties:
+                device_id: { type: string }
+                group_id: { type: string }
+                zone_id: { type: string }
+                content_id: { type: string }
+                widget_id: { type: string }
+                layout_id: { type: string }
+                playlist_id: { type: string }
+                title: { type: string }
+                start_time: { type: string }
+                end_time: { type: string }
+                timezone: { type: string }
+                recurrence: { type: string }
+                recurrence_end: { type: string }
+                priority: { type: integer }
+                color: { type: string }
+      responses:
+        '201':
+          description: Created schedule.
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Schedule' }
+  /schedules/device/{deviceId}:
+    get:
+      tags: [schedules]
+      summary: Get schedules for a device (device + group level)
+      description: 'Requires scope: read.'
+      x-required-scope: read
+      parameters:
+        - { name: deviceId, in: path, required: true, schema: { type: string } }
+      responses:
+        '200': { description: Array of schedules. }
+  /schedules/week:
+    get:
+      tags: [schedules]
+      summary: Expanded week view for a device (resolves recurrences)
+      description: 'Requires scope: read.'
+      x-required-scope: read
+      parameters:
+        - { name: device_id, in: query, required: true, schema: { type: string } }
+        - { name: date, in: query, schema: { type: string } }
+      responses:
+        '200': { description: Array of schedule instances. }
+  /schedules/{id}:
+    put:
+      tags: [schedules]
+      summary: Update a schedule
+      description: 'Requires scope: write.'
+      x-required-scope: write
+      parameters:
+        - { name: id, in: path, required: true, schema: { type: string } }
+      requestBody:
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/Schedule' }
+      responses:
+        '200': { description: Updated schedule. }
+    delete:
+      tags: [schedules]
+      summary: Delete a schedule
+      description: 'Requires scope: write.'
+      x-required-scope: write
+      parameters:
+        - { name: id, in: path, required: true, schema: { type: string } }
+      responses:
+        '200': { description: '{ success }.' }
+
+  # -------------------------------------------------------------------- walls
+  /walls:
+    get:
+      tags: [walls]
+      summary: List video walls (with attached devices)
+      description: 'Requires scope: read.'
+      x-required-scope: read
+      responses:
+        '200': { description: Array of walls. }
+    post:
+      tags: [walls]
+      summary: Create a video wall
+      description: 'Requires scope: write.'
+      x-required-scope: write
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [name]
+              properties:
+                name: { type: string }
+                grid_cols: { type: integer }
+                grid_rows: { type: integer }
+                bezel_h_mm: { type: number }
+                bezel_v_mm: { type: number }
+                playlist_id: { type: string }
+      responses:
+        '201': { description: Created wall. }
+  /walls/{id}:
+    get:
+      tags: [walls]
+      summary: Get a video wall with devices
+      description: 'Requires scope: read.'
+      x-required-scope: read
+      parameters:
+        - { name: id, in: path, required: true, schema: { type: string } }
+      responses:
+        '200': { description: Wall with devices. }
+    put:
+      tags: [walls]
+      summary: Update a video wall
+      description: 'Requires scope: write.'
+      x-required-scope: write
+      parameters:
+        - { name: id, in: path, required: true, schema: { type: string } }
+      requestBody:
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                name: { type: string }
+                grid_cols: { type: integer }
+                grid_rows: { type: integer }
+                bezel_h_mm: { type: number }
+                bezel_v_mm: { type: number }
+                sync_mode: { type: string }
+                leader_device_id: { type: string }
+                content_id: { type: string }
+                playlist_id: { type: string }
+      responses:
+        '200': { description: Updated wall. }
+    delete:
+      tags: [walls]
+      summary: Delete a video wall
+      description: 'Requires scope: write.'
+      x-required-scope: write
+      parameters:
+        - { name: id, in: path, required: true, schema: { type: string } }
+      responses:
+        '200': { description: '{ success }.' }
+  /walls/{id}/devices:
+    put:
+      tags: [walls]
+      summary: Set the wall's device grid positions (replaces member set)
+      description: 'Requires scope: write.'
+      x-required-scope: write
+      parameters:
+        - { name: id, in: path, required: true, schema: { type: string } }
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [devices]
+              properties:
+                devices:
+                  type: array
+                  items:
+                    type: object
+                    properties:
+                      device_id: { type: string }
+                      grid_col: { type: integer }
+                      grid_row: { type: integer }
+                      rotation:
+                        type: integer
+                        enum: [0, 90, 180, 270]
+                        default: 0
+                        description: >-
+                          How this panel is physically mounted, as degrees CLOCKWISE that its image
+                          must be turned to come out upright on the wall (the same convention as a
+                          device's `orientation`). canvas_* are in WALL space — the wall as the
+                          audience sees it — so a portrait-mounted 1920x1080 panel is a tall tile
+                          with rotation 90, and content needs no pre-rotating. Anything other than
+                          0/90/180/270 is stored as 0. While a panel is in a wall this replaces its
+                          own `orientation`, so the two can never rotate the content twice.
+                      canvas_x: { type: number }
+                      canvas_y: { type: number }
+                      canvas_width: { type: number }
+                      canvas_height: { type: number }
+      responses:
+        '200': { description: Updated wall with devices. }
+  /walls/{id}/content:
+    put:
+      tags: [walls]
+      summary: Set wall content (legacy single-video path)
+      description: 'Requires scope: write.'
+      x-required-scope: write
+      parameters:
+        - { name: id, in: path, required: true, schema: { type: string } }
+      requestBody:
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                content_id: { type: string }
+      responses:
+        '200': { description: '{ success }.' }
+  /walls/{id}/device-config/{deviceId}:
+    get:
+      tags: [walls]
+      summary: Get wall config for a specific member device
+      description: 'Requires scope: read.'
+      x-required-scope: read
+      parameters:
+        - { name: id, in: path, required: true, schema: { type: string } }
+        - { name: deviceId, in: path, required: true, schema: { type: string } }
+      responses:
+        '200': { description: Per-device wall config. }
+
+  # ------------------------------------------------------------------ reports
+  /reports/plays:
+    get:
+      tags: [reports]
+      summary: Query play logs
+      description: 'Requires scope: read.'
+      x-required-scope: read
+      parameters:
+        - { name: device_id, in: query, schema: { type: string } }
+        - { name: content_id, in: query, schema: { type: string } }
+        - { name: start, in: query, schema: { type: string } }
+        - { name: end, in: query, schema: { type: string } }
+        - { name: limit, in: query, schema: { type: integer } }
+      responses:
+        '200': { description: Array of play-log rows. }
+  /reports/summary:
+    get:
+      tags: [reports]
+      summary: Aggregated play summary report
+      description: 'Requires scope: read.'
+      x-required-scope: read
+      parameters:
+        - { name: device_id, in: query, schema: { type: string } }
+        - { name: start, in: query, schema: { type: string } }
+        - { name: end, in: query, schema: { type: string } }
+        - { name: group_by, in: query, schema: { type: string } }
+      responses:
+        '200':
+          description: 'Summary object: overall, by_content, by_device, by_hour, by_day.'
+  /reports/export:
+    get:
+      tags: [reports]
+      summary: Export proof-of-play as CSV
+      description: 'Requires scope: read.'
+      x-required-scope: read
+      parameters:
+        - { name: device_id, in: query, schema: { type: string } }
+        - { name: start, in: query, schema: { type: string } }
+        - { name: end, in: query, schema: { type: string } }
+      responses:
+        '200':
+          description: CSV file.
+          content:
+            text/csv:
+              schema: { type: string }
+  /reports/uptime:
+    get:
+      tags: [reports]
+      summary: Device uptime report
+      description: 'Requires scope: read.'
+      x-required-scope: read
+      parameters:
+        - { name: device_id, in: query, schema: { type: string } }
+        - { name: start, in: query, schema: { type: string } }
+        - { name: end, in: query, schema: { type: string } }
+      responses:
+        '200': { description: Array of per-device uptime rows. }
+
+  # ------------------------------------------------------------------ widgets
+  /widgets:
+    get:
+      tags: [widgets]
+      summary: List widgets in the current workspace
+      description: 'Requires scope: read.'
+      x-required-scope: read
+      responses:
+        '200':
+          description: Array of widgets.
+          content:
+            application/json:
+              schema:
+                type: array
+                items: { $ref: '#/components/schemas/Widget' }
+    post:
+      tags: [widgets]
+      summary: Create a widget
+      description: 'Requires scope: write.'
+      x-required-scope: write
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [widget_type, name]
+              properties:
+                widget_type: { type: string }
+                name: { type: string }
+                config: { type: object }
+      responses:
+        '201':
+          description: Created widget.
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Widget' }
+  /widgets/preview:
+    post:
+      tags: [widgets]
+      summary: Render an unsaved widget config to HTML (non-persisting)
+      description: 'Requires scope: write (any POST needs write under the scope ladder); renders to HTML without persisting anything.'
+      x-required-scope: write
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [widget_type]
+              properties:
+                widget_type: { type: string }
+                config: { type: object }
+      responses:
+        '200':
+          description: Rendered widget HTML.
+          content:
+            text/html:
+              schema: { type: string }
+  /widgets/{id}:
+    get:
+      tags: [widgets]
+      summary: Get a widget
+      description: 'Requires scope: read.'
+      x-required-scope: read
+      parameters:
+        - { name: id, in: path, required: true, schema: { type: string } }
+      responses:
+        '200':
+          description: Widget.
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Widget' }
+    put:
+      tags: [widgets]
+      summary: Update a widget
+      description: 'Requires scope: write.'
+      x-required-scope: write
+      parameters:
+        - { name: id, in: path, required: true, schema: { type: string } }
+      requestBody:
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                name: { type: string }
+                config: { type: object }
+      responses:
+        '200': { description: Updated widget. }
+    delete:
+      tags: [widgets]
+      summary: Delete a widget
+      description: 'Requires scope: write.'
+      x-required-scope: write
+      parameters:
+        - { name: id, in: path, required: true, schema: { type: string } }
+      responses:
+        '200': { description: '{ success }.' }
+  /widgets/{id}/render:
+    get:
+      tags: [widgets]
+      summary: Render a widget as an HTML page (public)
+      description: |
+        Unauthenticated device-render endpoint. Players fetch this HTML directly,
+        so no token or scope is required.
+      security: []
+      parameters:
+        - { name: id, in: path, required: true, schema: { type: string } }
+      responses:
+        '200':
+          description: Rendered widget HTML.
+          content:
+            text/html:
+              schema: { type: string }
+
+  # -------------------------------------------------------------------- kiosk
+  /kiosk:
+    get:
+      tags: [kiosk]
+      summary: List kiosk pages in the current workspace
+      description: 'Requires scope: read.'
+      x-required-scope: read
+      responses:
+        '200': { description: Array of kiosk pages. }
+    post:
+      tags: [kiosk]
+      summary: Create a kiosk page
+      description: 'Requires scope: write.'
+      x-required-scope: write
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [name]
+              properties:
+                name: { type: string }
+                config: { type: object }
+      responses:
+        '201': { description: Created kiosk page. }
+  /kiosk/{id}:
+    get:
+      tags: [kiosk]
+      summary: Get a kiosk page
+      description: 'Requires scope: read.'
+      x-required-scope: read
+      parameters:
+        - { name: id, in: path, required: true, schema: { type: string } }
+      responses:
+        '200': { description: Kiosk page. }
+    put:
+      tags: [kiosk]
+      summary: Update a kiosk page
+      description: 'Requires scope: write.'
+      x-required-scope: write
+      parameters:
+        - { name: id, in: path, required: true, schema: { type: string } }
+      requestBody:
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                name: { type: string }
+                config: { type: object }
+      responses:
+        '200': { description: Updated kiosk page. }
+    delete:
+      tags: [kiosk]
+      summary: Delete a kiosk page
+      description: 'Requires scope: write.'
+      x-required-scope: write
+      parameters:
+        - { name: id, in: path, required: true, schema: { type: string } }
+      responses:
+        '200': { description: '{ success }.' }
+  /kiosk/{id}/render:
+    get:
+      tags: [kiosk]
+      summary: Render a kiosk page as an HTML page (public)
+      description: |
+        Unauthenticated device-render endpoint. Devices fetch this HTML directly,
+        so no token or scope is required.
+      security: []
+      parameters:
+        - { name: id, in: path, required: true, schema: { type: string } }
+      responses:
+        '200':
+          description: Rendered kiosk HTML.
+          content:
+            text/html:
+              schema: { type: string }
+
+  # ----------------------------------------------------------------- activity
+  /activity:
+    get:
+      tags: [activity]
+      summary: Get the activity log
+      description: 'Requires scope: read.'
+      x-required-scope: read
+      parameters:
+        - { name: device_id, in: query, schema: { type: string } }
+        - $ref: '#/components/parameters/Limit'
+        - $ref: '#/components/parameters/Offset'
+      responses:
+        '200': { description: Array of activity entries. }

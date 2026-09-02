@@ -1,0 +1,33 @@
+<!DOCTYPE html>
+<html><head><meta charset="utf-8"><title>ScreenTinker storage self-test</title>
+<style>
+ html,body{margin:0;height:100%;background:#0b3d1f;color:#eaffea;
+   font-family:system-ui,sans-serif;display:flex;align-items:center;justify-content:center;text-align:center}
+ h1{font-size:5vw;margin:0 0 2vh} p{font-size:2vw;margin:.5vh 0;color:#b9e8c4}
+ code{font-size:1.6vw;color:#9fe6b5}
+</style></head>
+<body><div>
+  <h1>STORAGE OK</h1>
+  <p>The player is reading this card and running <code>autorun.brs</code>.</p>
+  <p id="js">JavaScript: running</p>
+  <p id="mods">BrightSign JS modules: checking…</p>
+  <p id="net">Server reachable: checking…</p>
+</div>
+<script>
+  // Each line below removes one suspect from the list, in the order they matter.
+  try {
+    var ok = [];
+    ['messageport','registry','deviceinfo','syncmanager'].forEach(function (m) {
+      try { require('@brightsign/' + m); ok.push(m); } catch (e) {}
+    });
+    document.getElementById('mods').textContent =
+      ok.length ? 'BrightSign JS modules: ' + ok.join(', ') : 'BrightSign JS modules: NONE (brightsign_js_objects_enabled?)';
+  } catch (e) {
+    document.getElementById('mods').textContent = 'BrightSign JS modules: require() unavailable';
+  }
+
+  fetch('https://screentinker.com/api/status', { cache: 'no-store' })
+    .then(function (r) { document.getElementById('net').textContent = 'Server reachable: YES (HTTP ' + r.status + ')'; })
+    .catch(function (e) { document.getElementById('net').textContent = 'Server reachable: NO — ' + e.message; });
+</script>
+</body></html>

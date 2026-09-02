@@ -1,0 +1,105 @@
+* { margin: 0; padding: 0; box-sizing: border-box; }
+
+/*
+ * ONE KNOB for every pre-playback screen, matching server/player/index.html.
+ *
+ * A pairing code is read from across a room, so what must stay constant is ANGULAR size, not
+ * pixel size — and a CSS pixel covers a sixteenth of the screen area on an 8K panel that it does
+ * on 1080p. Sizes below are rem against this root: 1rem = 10px at a 1080-tall viewport, and it
+ * scales from there. A Tizen web app is handed a 1920x1080 logical viewport on most panels, where
+ * this is arithmetically identical to the pixel values it replaces — the point is the panels where
+ * it is not.
+ *
+ * vmin rather than vw: portrait-mounted panels are common and vw would halve everything on one.
+ * Only the setup/pairing/toast chrome uses rem; the stage and PiP layers are laid out in %/vw/vh
+ * and are untouched.
+ */
+html { font-size: clamp(7px, 0.926vmin, 56px); }
+
+html, body {
+    width: 100%; height: 100%;
+    background: #000; color: #f1f5f9;
+    font-family: "Samsung One", "Tizen Sans", Arial, sans-serif;
+    overflow: hidden;
+    cursor: none;
+}
+
+.screen {
+    position: absolute; top: 0; left: 0;
+    width: 100%; height: 100%;
+    display: flex; align-items: center; justify-content: center;
+}
+.hidden { display: none !important; }
+
+/* Setup / pairing card */
+.card {
+    background: #111827;
+    border: 1px solid #1f2937;
+    border-radius: 1.8rem;
+    padding: 4.8rem 6.4rem;
+    text-align: center;
+    max-width: 76rem;
+}
+.card h1 { color: #3b82f6; font-size: 4.4rem; margin-bottom: 0.6rem; }
+.sub { color: #94a3b8; font-size: 2.2rem; margin-bottom: 3.6rem; }
+.card label { display: block; text-align: left; color: #94a3b8; font-size: 1.8rem; margin-bottom: 0.8rem; }
+
+#serverUrl {
+    width: 100%; font-size: 2.6rem; padding: 1.6rem 2rem;
+    border-radius: 1rem; border: 0.2rem solid #334155;
+    background: #0b1220; color: #f1f5f9; margin-bottom: 2.4rem;
+}
+#serverUrl:focus { outline: none; border-color: #3b82f6; }
+
+button {
+    font-size: 2.4rem; font-weight: bold; color: #fff;
+    background: #3b82f6; border: none; border-radius: 1rem;
+    padding: 1.6rem 4rem; cursor: pointer;
+}
+button:focus { outline: 0.3rem solid #93c5fd; }
+button.ghost { background: transparent; color: #64748b; font-size: 1.8rem; margin-top: 2.4rem; padding: 0.8rem; }
+
+.status { color: #64748b; font-size: 1.8rem; margin-top: 2rem; min-height: 2.4rem; }
+.status.error { color: #ef4444; }
+
+/* Pairing code */
+.code {
+    font-size: 9.6rem; font-weight: bold; letter-spacing: 1.6rem;
+    color: #22c55e; margin: 2.4rem 0; font-family: monospace;
+}
+.hint { color: #94a3b8; font-size: 2rem; line-height: 1.5; }
+
+/* Playback stage */
+.stage { background: #000; }
+.stage img, .stage video, .stage iframe {
+    position: absolute; top: 0; left: 0;
+    width: 100%; height: 100%; border: 0;
+}
+.stage img.contain, .stage video.contain { object-fit: contain; }
+.stage img.cover,   .stage video.cover   { object-fit: cover; }
+.stage img.fill,    .stage video.fill    { object-fit: fill; }
+
+/* Video wall mode: the stage is positioned (in vw/vh) as this screen's slice of the
+   wall's player rect; media stretches to fill (object-fit:fill) so a given source row
+   lands on the same physical line across every screen that shares a viewport height. */
+.stage.wall-mode img, .stage.wall-mode video, .stage.wall-mode iframe { object-fit: fill; }
+
+/* #109: PiP overlay layer. Sits above #stage and fills the same viewport box so a
+   child positioned to a corner lands in the corner of the visible content. app.js
+   applies the SAME orientation transform here as on #stage (portrait/flipped). It is
+   pointer-transparent and empty (invisible) until PipOverlay renders into it. */
+#pip {
+    position: fixed; top: 0; left: 0;
+    width: 100vw; height: 100vh;
+    pointer-events: none;
+    z-index: 50;
+}
+#pip > div { box-shadow: 0 6px 28px rgba(0,0,0,0.55); }
+
+/* Toast */
+.toast {
+    position: absolute; bottom: 2.4rem; left: 50%; transform: translateX(-50%);
+    background: rgba(17,24,39,0.92); color: #f1f5f9;
+    padding: 1.2rem 2.4rem; border-radius: 1rem; font-size: 1.8rem;
+    border: 0.1rem solid #334155;
+}

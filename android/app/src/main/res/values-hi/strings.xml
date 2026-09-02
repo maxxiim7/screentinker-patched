@@ -1,0 +1,9 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- Hindi: same as English by design (matches web hi.js skeleton).
+     Replace with native-reviewed translations before publicizing. -->
+<resources>
+    <string name="app_name">RemoteDisplay</string>
+    <string name="accessibility_description">RemoteDisplay uses accessibility to enable remote power controls and system navigation.</string>
+    <string name="device_blocked_status">यह स्क्रीन डैशबोर्ड में अवरोधित कर दी गई है</string>
+    <string name="device_unpaired_status">यह स्क्रीन अनयुग्मित हो गई — फिर से युग्मित होने की प्रतीक्षा</string>
+</resources>

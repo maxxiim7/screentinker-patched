@@ -1,0 +1,1747 @@
+/* Layout */
+body {
+  display: flex;
+  overflow: hidden;
+}
+
+.sidebar {
+  width: var(--sidebar-width);
+  height: 100vh;
+  background: var(--bg-secondary);
+  border-right: 1px solid var(--border);
+  display: flex;
+  flex-direction: column;
+  flex-shrink: 0;
+  position: fixed;
+  left: 0;
+  top: 0;
+  z-index: 100;
+}
+
+.sidebar-header {
+  padding: 20px 16px;
+  border-bottom: 1px solid var(--border);
+}
+
+.logo {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  color: var(--accent);
+  font-weight: 700;
+  font-size: 16px;
+}
+
+/* Workspace switcher (Phase 3 MVP). Sits in sidebar-header below the logo.
+   Three render modes via JS: dropdown (>1 ws), static text (1 ws),
+   muted empty state (0 ws). */
+.workspace-switcher { position: relative; margin-top: 12px; }
+.workspace-switcher-button {
+  display: flex; align-items: center; justify-content: space-between;
+  width: 100%; padding: 8px 10px;
+  background: var(--bg-card); border: 1px solid var(--border);
+  border-radius: var(--radius); color: var(--text-primary);
+  font-size: 13px; cursor: pointer; transition: all var(--transition);
+}
+.workspace-switcher-button:hover { border-color: var(--accent); }
+.workspace-switcher-static {
+  display: block; padding: 4px 2px;
+  color: var(--text-primary); font-size: 13px; font-weight: 500;
+}
+.workspace-switcher-static::before {
+  content: 'Workspace';
+  display: block;
+  font-size: 10px; text-transform: uppercase; letter-spacing: 0.5px;
+  color: var(--text-muted); margin-bottom: 2px;
+}
+.workspace-switcher-empty {
+  display: block; padding: 8px 10px;
+  color: var(--text-muted); font-size: 12px; font-style: italic;
+}
+/* #19: single-workspace view - name + always-visible manage icons (no dropdown). */
+.workspace-switcher-single { display: flex; align-items: center; gap: 4px; }
+.workspace-switcher-single .workspace-switcher-static { flex: 1; min-width: 0; }
+.workspace-switcher-single .workspace-switcher-members,
+.workspace-switcher-single .workspace-switcher-pencil { visibility: visible; align-self: end; }
+.workspace-switcher-button .chev {
+  flex-shrink: 0; margin-left: 8px; color: var(--text-muted);
+  transition: transform var(--transition);
+}
+.workspace-switcher.open .chev { transform: rotate(180deg); }
+.workspace-switcher-menu {
+  display: none;
+  /* Width: detach from the narrow sidebar-header (188px content width). The
+     sidebar is z-indexed and the dropdown is free to extend beyond the
+     sidebar into the main content area. min/max bounds keep it readable
+     for normal-length names without sprawling on extreme cases. */
+  position: absolute; top: calc(100% + 4px); left: 0;
+  min-width: 280px; max-width: 360px;
+  background: var(--bg-card); border: 1px solid var(--border);
+  border-radius: var(--radius); box-shadow: 0 4px 12px rgba(0,0,0,0.3);
+  max-height: 360px; padding: 4px 0; overflow-y: auto; z-index: 100;
+}
+.workspace-switcher.open .workspace-switcher-menu { display: block; }
+/* #16: sticky type-to-filter search header inside the (scrolling) menu. */
+.workspace-switcher-search {
+  position: sticky; top: 0; z-index: 1;
+  background: var(--bg-card); padding: 8px;
+  border-bottom: 1px solid var(--border);
+}
+.workspace-switcher-search input {
+  width: 100%; box-sizing: border-box; padding: 6px 8px;
+  background: var(--bg-input); border: 1px solid var(--border);
+  border-radius: var(--radius); color: var(--text-primary); font-size: 13px;
+}
+.workspace-switcher-search input:focus { outline: none; border-color: var(--accent); }
+.workspace-switcher-noresults {
+  padding: 12px; color: var(--text-muted); font-size: 13px; text-align: center;
+}
+.workspace-switcher-item {
+  display: flex; align-items: center; gap: 8px;
+  padding: 8px 12px; cursor: pointer;
+  border-bottom: 1px solid var(--border);
+  color: var(--text-primary); font-size: 13px;
+}
+.workspace-switcher-item:last-child { border-bottom: none; }
+.workspace-switcher-item:hover { background: var(--bg-input); }
+/* keyboard-cursor highlight (arrow keys) - same surface as hover */
+.workspace-switcher-item.highlighted { background: var(--bg-input); }
+.workspace-switcher-item.current { font-weight: 600; }
+.workspace-switcher-item .check {
+  flex-shrink: 0; color: var(--accent); width: 14px;
+}
+.workspace-switcher-item .ws-meta { flex: 1; min-width: 0; }
+.workspace-switcher-item .ws-name {
+  white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
+}
+.workspace-switcher-item .ws-org {
+  font-size: 11px; color: var(--text-muted); margin-top: 1px;
+  /* nowrap + ellipsis: long "Org Name . N devices" lines truncate cleanly
+     instead of wrapping onto a second line that doubles row height. */
+  white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
+}
+.workspace-switcher-pencil {
+  flex-shrink: 0; visibility: hidden;
+  background: none; border: none; padding: 4px;
+  color: var(--text-muted); cursor: pointer;
+  border-radius: 4px; transition: all var(--transition);
+}
+.workspace-switcher-item:hover .workspace-switcher-pencil { visibility: visible; }
+.workspace-switcher-pencil:hover { color: var(--accent); background: var(--bg-input); }
+/* "New workspace" — a full-width action UNDER the selector, in both the single and dropdown views.
+   ⚠️ ALWAYS VISIBLE, unlike the rename/members icons beside it, which reveal on hover. Those
+   decorate a row you can already see; this is the only route to a capability that is otherwise
+   invisible, and hiding it is how 313 organizations ended up with one workspace each.
+   ⚠️ AND IT IS NOT IN THE DROPDOWN. Inside the menu it read as a workspace you could switch to,
+   and in the single-workspace case — the common one — there is no menu to open at all. */
+.workspace-switcher-create {
+  display: flex; align-items: center; gap: 6px;
+  width: 100%; margin-top: 6px; padding: 5px 2px;
+  background: none; border: none;
+  color: var(--text-muted); font-size: 12px; text-align: left;
+  cursor: pointer; border-radius: 4px; transition: all var(--transition);
+}
+.workspace-switcher-create:hover { color: var(--accent); }
+.workspace-switcher-create svg { flex-shrink: 0; }
+/* ⚠️ THE MENU ANCHORS TO THE CONTAINER, SO THIS CONTROL MUST NOT ADD TO ITS HEIGHT.
+   .workspace-switcher-menu is absolutely positioned at top: calc(100% + 4px) against
+   .workspace-switcher. Adding an in-flow row after the menu grew that container by ~30px, so the
+   dropdown opened BELOW the "New workspace" line instead of directly under its own button — the
+   action wedged between the selector and the list it opens. Taking the control out of flow keeps
+   the anchor where the menu expects it, and the container reserves the space instead. */
+.workspace-switcher { padding-bottom: 28px; }
+.workspace-switcher-create { position: absolute; left: 0; bottom: 0; margin-top: 0; }
+/* Members icon - same shape as the pencil; navigates to #/workspace/:id/members. */
+.workspace-switcher-members {
+  flex-shrink: 0; visibility: hidden;
+  background: none; border: none; padding: 4px;
+  color: var(--text-muted); cursor: pointer;
+  border-radius: 4px; transition: all var(--transition);
+}
+.workspace-switcher-item:hover .workspace-switcher-members { visibility: visible; }
+.workspace-switcher-members:hover { color: var(--accent); background: var(--bg-input); }
+
+/* Workspace members page (Phase 2 user-mgmt, slice 2A read-only). Three
+   sections render via JS: direct members, via_org access, pending invites.
+   Row layout mirrors the sidebar user card's avatar pattern for visual
+   continuity. via_org rows are opacity-reduced and invite rows use the
+   input-bg shade so the three states are distinguishable at a glance. */
+.members-list { display: flex; flex-direction: column; gap: 4px; }
+.member-row {
+  display: flex; align-items: center; gap: 12px;
+  padding: 10px 12px; border: 1px solid var(--border);
+  border-radius: var(--radius); background: var(--bg-card);
+}
+.member-row--via-org { opacity: 0.75; }
+.member-row--invited { background: var(--bg-input); }
+.member-avatar {
+  flex-shrink: 0;
+  width: 32px; height: 32px; border-radius: 50%;
+  background: var(--accent); color: white;
+  display: flex; align-items: center; justify-content: center;
+  font-size: 13px; font-weight: 600;
+}
+.member-avatar--muted { background: var(--text-muted); }
+.member-meta { flex: 1; min-width: 0; }
+.member-name {
+  font-size: 13px; font-weight: 500; color: var(--text-primary);
+  display: flex; align-items: center; gap: 8px;
+  white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
+}
+.member-email {
+  font-size: 11px; color: var(--text-muted); margin-top: 1px;
+  white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
+}
+.member-role {
+  flex-shrink: 0; font-size: 12px; color: var(--text-secondary);
+  padding: 4px 8px; background: var(--bg-input);
+  border-radius: 4px; min-width: 60px; text-align: center;
+}
+.member-detail {
+  flex-shrink: 0; font-size: 11px; color: var(--text-muted);
+  min-width: 110px; text-align: right;
+}
+.member-via-org { font-style: italic; }
+.member-badge {
+  font-size: 10px; text-transform: uppercase; letter-spacing: 0.5px;
+  padding: 2px 6px; background: var(--bg-input); color: var(--text-muted);
+  border-radius: 3px; font-weight: 600;
+}
+
+/* Slice 2B - mutation affordances. .member-actions is the cell that holds
+   per-row admin buttons (remove on direct-member rows, cancel on invited
+   rows). via_org rows omit the cell entirely. The role select replaces the
+   .member-role div for admins on direct-member rows. */
+.member-role-select {
+  flex-shrink: 0; font-size: 12px;
+  background: var(--bg-input); color: var(--text-primary);
+  border: 1px solid var(--border); border-radius: 4px;
+  padding: 4px 8px; min-width: 90px; cursor: pointer;
+}
+.member-role-select:hover { border-color: var(--accent); }
+.member-actions {
+  flex-shrink: 0; display: flex; align-items: center; gap: 4px;
+  margin-left: 4px;
+}
+.member-action-btn {
+  display: inline-flex; align-items: center; justify-content: center;
+  background: none; border: none; padding: 6px;
+  color: var(--text-muted); cursor: pointer;
+  border-radius: 4px; transition: all var(--transition);
+}
+.member-action-btn:hover { background: var(--bg-input); }
+.member-action-btn--danger:hover { color: var(--danger); }
+
+.nav-links {
+  flex: 1;
+  padding: 12px 8px;
+  /* Scroll the nav when it's taller than the viewport (short screens, e.g.
+     1366x768) so items below the fold (Settings) stay reachable. min-height:0
+     is required for a flex child to shrink and scroll instead of overflowing. */
+  overflow-y: auto;
+  min-height: 0;
+}
+
+.nav-link {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 10px 12px;
+  border-radius: var(--radius);
+  color: var(--text-secondary);
+  transition: all var(--transition);
+  margin-bottom: 2px;
+}
+
+.nav-link:hover {
+  background: var(--bg-card);
+  color: var(--text-primary);
+}
+
+.nav-link.active {
+  background: var(--accent);
+  color: white;
+}
+
+.sidebar-footer {
+  padding: 16px;
+  border-top: 1px solid var(--border);
+}
+
+.connection-status {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  font-size: 12px;
+  color: var(--text-muted);
+}
+
+.version-status {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  font-size: 12px;
+  color: var(--text-muted);
+  margin-top: 6px;
+}
+
+.version-badge {
+  background: var(--warning);
+  color: #000;
+  font-size: 10px;
+  font-weight: 600;
+  padding: 1px 6px;
+  border-radius: 10px;
+  line-height: 1.4;
+}
+
+.status-dot {
+  width: 8px;
+  height: 8px;
+  border-radius: 50%;
+  flex-shrink: 0;
+}
+
+.status-dot.online { background: var(--success); box-shadow: 0 0 6px var(--success); }
+.status-dot.offline { background: var(--danger); }
+.status-dot.provisioning { background: var(--warning); animation: pulse 2s infinite; }
+/* v4 liveness (server-derived): healthy=green, degraded=amber+pulse (reconnecting), offline=red (above) */
+.status-dot.healthy { background: var(--success); box-shadow: 0 0 6px var(--success); }
+.status-dot.degraded { background: var(--warning); box-shadow: 0 0 6px var(--warning); animation: pulse 2s infinite; }
+
+@keyframes pulse {
+  0%, 100% { opacity: 1; }
+  50% { opacity: 0.4; }
+}
+
+/* Wraps the (optional) banners strip and main content so they stack
+   vertically as a single flex column, independent from the fixed sidebar.
+   Without this wrapper, #banners and .content would be direct siblings in
+   the (row-direction) body flexbox, turning the banner into a narrow flex
+   item next to the content instead of a full-width strip above it, and
+   shifting the whole dashboard layout out of alignment with the sidebar. */
+.main-wrapper {
+  margin-left: var(--sidebar-width);
+  flex: 1;
+  display: flex;
+  flex-direction: column;
+  height: 100vh;
+  min-width: 0;
+}
+
+.content {
+  flex: 1;
+  min-height: 0;
+  overflow-y: auto;
+  padding: 24px 32px;
+}
+
+/* Page Header */
+.page-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  margin-bottom: 24px;
+}
+
+.page-header h1 {
+  font-size: 24px;
+  font-weight: 600;
+}
+
+.page-header .subtitle {
+  color: var(--text-secondary);
+  font-size: 13px;
+  margin-top: 2px;
+}
+
+/* Buttons */
+.btn {
+  padding: 8px 16px;
+  border-radius: var(--radius);
+  font-weight: 500;
+  font-size: 13px;
+  transition: all var(--transition);
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+}
+
+.btn-primary {
+  background: var(--accent);
+  color: white;
+}
+
+.btn-primary:hover {
+  background: var(--accent-hover);
+}
+
+.btn-secondary {
+  background: var(--bg-card);
+  border: 1px solid var(--border);
+  color: var(--text-primary);
+}
+
+.btn-secondary:hover {
+  background: var(--bg-card-hover);
+}
+
+.btn-danger {
+  background: var(--danger-dim);
+  color: #fca5a5;
+}
+
+.btn-danger:hover {
+  background: var(--danger);
+  color: white;
+}
+
+.btn-sm {
+  padding: 5px 10px;
+  font-size: 12px;
+}
+
+.selection-group-menu {
+  position: relative;
+}
+
+.selection-bar-divider {
+  width: 1px;
+  height: 22px;
+  margin: 0 2px;
+  background: var(--border);
+}
+
+.selection-group-menu summary {
+  list-style: none;
+  cursor: pointer;
+}
+
+.selection-group-menu summary::-webkit-details-marker {
+  display: none;
+}
+
+.selection-group-menu-panel {
+  display: none;
+  position: absolute;
+  top: calc(100% + 4px);
+  left: 0;
+  z-index: 20;
+  min-width: 200px;
+  padding: 4px;
+  background: var(--bg-card);
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  box-shadow: 0 8px 20px rgba(0, 0, 0, 0.28);
+}
+
+.selection-group-menu[open] .selection-group-menu-panel {
+  display: grid;
+}
+
+.selection-group-menu-panel button {
+  width: 100%;
+  padding: 7px 9px;
+  border: 0;
+  border-radius: calc(var(--radius) - 2px);
+  background: transparent;
+  color: var(--text-primary);
+  font: inherit;
+  font-size: 12px;
+  text-align: left;
+  cursor: pointer;
+}
+
+.selection-group-menu-panel button:hover {
+  background: var(--bg-card-hover);
+}
+
+.selection-group-menu-divider {
+  height: 1px;
+  margin: 4px 2px;
+  background: var(--border);
+}
+
+.selection-group-menu-panel .selection-group-menu-create {
+  color: var(--accent);
+}
+
+.btn-icon {
+  padding: 6px;
+  border-radius: var(--radius);
+  color: var(--text-secondary);
+  transition: all var(--transition);
+}
+
+.btn-icon:hover {
+  background: var(--bg-card);
+  color: var(--text-primary);
+}
+
+/* Device Grid */
+.device-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(300px, 1fr));
+  gap: 20px;
+}
+
+.device-card {
+  background: var(--bg-card);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-lg);
+  overflow: hidden;
+  transition: all var(--transition);
+  cursor: pointer;
+}
+
+.device-card:hover {
+  border-color: var(--accent);
+  box-shadow: var(--shadow);
+  transform: translateY(-2px);
+}
+
+/* #238: a rotated display shown as its viewer sees it. The stage is the panel's face; the frame is
+   its framebuffer, turned back by the mount (js/lib/device-frame.js sizes and rotates it from the
+   players' shared rule). The frame is centred on its offset parent, so a stage without
+   `position: relative` would centre it on the page — hence both halves live here together. */
+.display-stage {
+  position: relative;
+  overflow: hidden;
+}
+
+.display-frame {
+  position: absolute;
+  top: 0;
+  left: 0;
+  width: 100%;
+  height: 100%;
+}
+
+.device-card-preview {
+  aspect-ratio: 16/9;
+  background: var(--bg-primary);
+  position: relative;
+  overflow: hidden;
+}
+
+.device-card-preview img {
+  width: 100%;
+  height: 100%;
+  object-fit: cover;
+}
+
+.device-card-preview .no-preview {
+  position: absolute;
+  inset: 0;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  color: var(--text-muted);
+  gap: 8px;
+}
+
+.device-card-preview .no-preview svg {
+  opacity: 0.3;
+}
+
+.device-card-status {
+  position: absolute;
+  top: 10px;
+  right: 10px;
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  background: rgba(0,0,0,0.7);
+  backdrop-filter: blur(4px);
+  padding: 4px 10px;
+  border-radius: 20px;
+  font-size: 11px;
+  font-weight: 500;
+}
+/* Device cards render the reused liveness pill (.device-status-badge from device-detail), which brings
+   its own bg/padding/shape — so neutralize the dark wrapper for those. Wall cards keep the dark pill
+   above for their "NxN wall" label (they share .device-card-status but have no .is-liveness). */
+.device-card-status.is-liveness {
+  background: none;
+  backdrop-filter: none;
+  padding: 0;
+  border-radius: 0;
+}
+/* Lift the list pill off the screenshot so it stays legible over any image. */
+.device-card-status.is-liveness .device-status-badge {
+  box-shadow: 0 1px 4px rgba(0,0,0,0.6);
+}
+
+.device-card-select {
+  position: absolute;
+  top: 8px;
+  left: 8px;
+  z-index: 5;
+  background: rgba(0,0,0,0.6);
+  border-radius: 4px;
+  padding: 3px 5px;
+  display: flex;
+  align-items: center;
+  cursor: pointer;
+  opacity: 0;
+  transition: opacity 0.15s;
+}
+.device-card:hover .device-card-select,
+.device-card.selected .device-card-select { opacity: 1; }
+.device-card-select input { cursor: pointer; margin: 0; }
+.device-card.selected { outline: 2px solid var(--primary, #3B82F6); outline-offset: -2px; }
+
+/* Wall editor — free-form pan/zoom canvas */
+.wall-viewport {
+  position: relative;
+  overflow: hidden;
+  cursor: grab;
+  user-select: none;
+  background:
+    linear-gradient(rgba(255,255,255,0.04) 1px, transparent 1px) 0 0 / 40px 40px,
+    linear-gradient(90deg, rgba(255,255,255,0.04) 1px, transparent 1px) 0 0 / 40px 40px,
+    var(--bg-primary);
+}
+.wall-viewport.panning { cursor: grabbing; }
+/* Inner canvas: a 0×0 anchor whose CSS transform supplies pan + zoom.
+   All rect children are absolutely positioned in canvas-data coordinates
+   and inherit the parent transform. transform-origin is the canvas's
+   top-left so pan offsets map cleanly to data → screen pixels. */
+.wall-canvas {
+  position: absolute;
+  top: 0;
+  left: 0;
+  width: 0;
+  height: 0;
+  transform-origin: 0 0;
+  /* Disable transition so panning doesn't lag behind the cursor */
+}
+.wall-zoom-readout {
+  position: absolute;
+  bottom: 8px;
+  right: 12px;
+  background: rgba(0,0,0,0.65);
+  color: #fff;
+  padding: 3px 8px;
+  border-radius: 12px;
+  font-size: 11px;
+  pointer-events: none;
+  font-variant-numeric: tabular-nums;
+}
+
+.wall-screen {
+  position: absolute;
+  background: rgba(59,130,246,0.08);
+  border: 2px solid var(--primary, #3B82F6);
+  border-radius: 4px;
+  box-sizing: border-box;
+  cursor: move;
+  user-select: none;
+  touch-action: none;
+  overflow: hidden;
+}
+.wall-screen-overlap {
+  position: absolute;
+  background: rgba(96,165,250,0.35);
+  pointer-events: none;
+  display: none;
+  z-index: 1;
+}
+.wall-screen-label {
+  position: absolute;
+  top: 4px;
+  left: 6px;
+  right: 24px;
+  pointer-events: none;
+  z-index: 2;
+}
+.wall-screen-name {
+  font-size: 12px;
+  font-weight: 600;
+  color: var(--text-primary, #fff);
+  text-shadow: 0 1px 2px rgba(0,0,0,0.6);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+.wall-screen-meta {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  font-size: 10px;
+  color: var(--text-muted);
+  text-shadow: 0 1px 2px rgba(0,0,0,0.6);
+}
+.wall-screen-remove {
+  position: absolute;
+  top: 4px;
+  right: 4px;
+  z-index: 3;
+  width: 20px;
+  height: 20px;
+  background: rgba(0,0,0,0.6);
+  color: #fff;
+  border: none;
+  border-radius: 50%;
+  cursor: pointer;
+  font-size: 14px;
+  line-height: 1;
+  padding: 0;
+}
+.wall-screen-remove:hover { background: var(--danger, #ef4444); }
+
+.wall-player {
+  position: absolute;
+  background: rgba(96,165,250,0.18);
+  border: 2px dashed #60a5fa;
+  border-radius: 4px;
+  box-sizing: border-box;
+  cursor: move;
+  user-select: none;
+  touch-action: none;
+  z-index: 5;
+  box-shadow: 0 0 0 9999px transparent; /* keeps stacking explicit */
+}
+.wall-player-label {
+  position: absolute;
+  top: 4px;
+  left: 6px;
+  pointer-events: none;
+  color: #dbeafe;
+  text-shadow: 0 1px 2px rgba(0,0,0,0.6);
+  font-size: 11px;
+  letter-spacing: 1px;
+}
+
+/* Selected rect highlight (works for both screens and the player) */
+.wall-screen.selected,
+.wall-player.selected {
+  outline: 3px solid #facc15;
+  outline-offset: 1px;
+  z-index: 6;
+}
+
+/* Fine-position panel inputs */
+.wall-pos-grid {
+  display: grid;
+  grid-template-columns: auto 1fr auto 1fr;
+  gap: 6px 8px;
+  align-items: center;
+  font-size: 12px;
+}
+.wall-pos-grid label {
+  font-size: 11px;
+  color: var(--text-muted);
+  text-transform: uppercase;
+  letter-spacing: 0.5px;
+}
+.wall-pos-grid input {
+  width: 100%;
+  padding: 4px 6px;
+  background: var(--bg-input);
+  border: 1px solid var(--border);
+  border-radius: 4px;
+  color: var(--text-primary, #fff);
+  font: inherit;
+  font-variant-numeric: tabular-nums;
+}
+.wall-pos-grid input:focus { outline: 1px solid var(--primary); outline-offset: 0; border-color: var(--primary); }
+
+/* Eight resize handles, used by both screens and the player */
+.wall-handle {
+  position: absolute;
+  width: 10px;
+  height: 10px;
+  background: #fff;
+  border: 1px solid #1d4ed8;
+  border-radius: 2px;
+  z-index: 4;
+}
+.wall-player .wall-handle { border-color: #60a5fa; }
+.wall-handle-nw { top: -5px; left: -5px; cursor: nw-resize; }
+.wall-handle-n  { top: -5px; left: 50%; transform: translateX(-50%); cursor: n-resize; }
+.wall-handle-ne { top: -5px; right: -5px; cursor: ne-resize; }
+.wall-handle-e  { top: 50%; right: -5px; transform: translateY(-50%); cursor: e-resize; }
+.wall-handle-se { bottom: -5px; right: -5px; cursor: se-resize; }
+.wall-handle-s  { bottom: -5px; left: 50%; transform: translateX(-50%); cursor: s-resize; }
+.wall-handle-sw { bottom: -5px; left: -5px; cursor: sw-resize; }
+.wall-handle-w  { top: 50%; left: -5px; transform: translateY(-50%); cursor: w-resize; }
+
+/* Wall editor — legacy cells (kept for migration; new editor uses wall-canvas) */
+.wall-cell {
+  position: relative;
+  background: var(--bg-card);
+  border: 2px dashed var(--border);
+  border-radius: var(--radius);
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  font-size: 11px;
+  color: var(--text-secondary);
+  user-select: none;
+}
+.wall-cell.occupied {
+  background: rgba(59,130,246,0.15);
+  border: 2px solid var(--primary, #3B82F6);
+  cursor: grab;
+}
+.wall-cell.occupied:active { cursor: grabbing; }
+.wall-cell.drag-over {
+  border-color: var(--success, #10b981);
+  box-shadow: 0 0 0 2px rgba(16,185,129,0.25) inset;
+}
+.wall-cell-name { font-weight: 500; padding: 0 6px; text-align: center; }
+.wall-cell-pos {
+  position: absolute;
+  bottom: 4px;
+  font-size: 9px;
+  color: var(--text-muted);
+  letter-spacing: 0.5px;
+}
+.wall-cell-remove {
+  position: absolute;
+  top: 4px; right: 4px;
+  background: rgba(0,0,0,0.6);
+  border: none;
+  color: #fff;
+  border-radius: 50%;
+  width: 20px; height: 20px;
+  cursor: pointer;
+  font-size: 14px;
+  line-height: 1;
+  padding: 0;
+}
+.wall-cell-remove:hover { background: var(--danger, #ef4444); }
+
+.wall-card .wall-card-preview {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  background: linear-gradient(135deg, rgba(139,92,246,0.15), rgba(59,130,246,0.1));
+}
+.wall-card-grid {
+  display: grid;
+  gap: 4px;
+  width: 65%;
+  aspect-ratio: 16/9;
+  padding: 8px;
+}
+.wall-card-cell {
+  background: rgba(255,255,255,0.05);
+  border: 1px solid rgba(139,92,246,0.3);
+  border-radius: 2px;
+}
+.wall-card-cell.filled {
+  background: rgba(139,92,246,0.5);
+  border-color: rgba(139,92,246,0.9);
+}
+
+.device-card-progress {
+  position: absolute;
+  left: 0;
+  right: 0;
+  bottom: 0;
+  padding: 6px 10px 8px;
+  background: linear-gradient(to top, rgba(0,0,0,0.85), rgba(0,0,0,0));
+  color: #fff;
+  font-size: 11px;
+  pointer-events: none;
+}
+.device-card-progress-label {
+  display: flex;
+  justify-content: space-between;
+  gap: 8px;
+  margin-bottom: 4px;
+  font-weight: 500;
+  text-shadow: 0 1px 2px rgba(0,0,0,0.6);
+}
+.device-card-progress-label .dcp-name {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  flex: 1;
+}
+.device-card-progress-label .dcp-time {
+  font-variant-numeric: tabular-nums;
+  opacity: 0.85;
+}
+.device-card-progress-track {
+  height: 3px;
+  background: rgba(255,255,255,0.2);
+  border-radius: 2px;
+  overflow: hidden;
+}
+.device-card-progress-fill {
+  height: 100%;
+  width: 0%;
+  background: var(--primary, #3B82F6);
+  transition: width 0.9s linear;
+}
+.device-card-progress-fill.indeterminate {
+  background: linear-gradient(90deg, transparent, var(--primary, #3B82F6), transparent);
+  background-size: 50% 100%;
+  animation: dcp-indeterminate 1.4s linear infinite;
+}
+@keyframes dcp-indeterminate {
+  0% { background-position: -50% 0; }
+  100% { background-position: 150% 0; }
+}
+
+.device-card-body {
+  padding: 14px 16px;
+}
+
+.device-card-name {
+  font-weight: 600;
+  font-size: 15px;
+  margin-bottom: 6px;
+}
+
+.device-card-meta {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  color: var(--text-secondary);
+  font-size: 12px;
+}
+
+.device-card-meta .meta-item {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+}
+
+/* Device Detail */
+.device-detail {
+  max-width: 1200px;
+}
+
+.back-link {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  color: var(--text-secondary);
+  margin-bottom: 16px;
+  font-size: 13px;
+  transition: color var(--transition);
+}
+
+.back-link:hover { color: var(--text-primary); }
+
+.device-header {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  margin-bottom: 20px;
+}
+
+.device-header-left {
+  display: flex;
+  align-items: center;
+  gap: 16px;
+}
+
+.device-header-left h1 {
+  font-size: 22px;
+}
+
+.device-status-badge {
+  padding: 4px 12px;
+  border-radius: 20px;
+  font-size: 12px;
+  font-weight: 500;
+}
+
+.device-status-badge.online { background: var(--success-dim); color: var(--success); }
+.device-status-badge.offline { background: var(--danger-dim); color: #fca5a5; }
+.device-status-badge.provisioning { background: var(--warning-dim); color: var(--warning); }
+/* v4 liveness (server-derived): healthy=green, degraded=amber (reconnecting), offline reuses .offline above */
+.device-status-badge.healthy { background: var(--success-dim); color: var(--success); }
+.device-status-badge.degraded { background: var(--warning-dim); color: var(--warning); }
+
+.tabs {
+  display: flex;
+  gap: 0;
+  border-bottom: 1px solid var(--border);
+  margin-bottom: 20px;
+}
+
+.tab {
+  padding: 10px 20px;
+  color: var(--text-secondary);
+  font-size: 13px;
+  font-weight: 500;
+  border-bottom: 2px solid transparent;
+  transition: all var(--transition);
+  cursor: pointer;
+}
+
+.tab:hover { color: var(--text-primary); }
+.tab.active { color: var(--accent); border-bottom-color: var(--accent); }
+
+.tab-content { display: none; }
+.tab-content.active { display: block; }
+
+/* Screenshot Preview */
+.screenshot-container {
+  background: var(--bg-primary);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-lg);
+  overflow: hidden;
+  aspect-ratio: 16/9;
+  position: relative;
+  margin-bottom: 20px;
+}
+
+.screenshot-container img {
+  width: 100%;
+  height: 100%;
+  object-fit: contain;
+}
+
+.screenshot-container .no-screenshot {
+  position: absolute;
+  inset: 0;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  color: var(--text-muted);
+  gap: 8px;
+}
+
+/* Remote Control */
+.remote-container {
+  display: flex;
+  gap: 20px;
+}
+
+.remote-screen {
+  flex: 1;
+  background: #000;
+  border: 1px solid var(--border);
+  border-radius: var(--radius-lg);
+  overflow: hidden;
+  position: relative;
+  cursor: crosshair;
+}
+
+.remote-screen canvas {
+  width: 100%;
+  display: block;
+}
+
+.remote-controls {
+  width: 120px;
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+
+.remote-controls .btn {
+  width: 100%;
+  justify-content: center;
+}
+
+/* Playlist */
+.playlist-container {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+
+.playlist-item {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  padding: 12px;
+  background: var(--bg-secondary);
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  transition: all var(--transition);
+}
+
+.playlist-item:hover {
+  border-color: var(--border-light);
+}
+
+.playlist-item-thumb {
+  width: 80px;
+  height: 45px;
+  border-radius: 4px;
+  object-fit: cover;
+  background: var(--bg-primary);
+  flex-shrink: 0;
+}
+
+.playlist-item-info {
+  flex: 1;
+  min-width: 0;
+}
+
+.playlist-item-name {
+  font-weight: 500;
+  font-size: 13px;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.playlist-item-meta {
+  font-size: 11px;
+  color: var(--text-secondary);
+}
+
+.playlist-item-actions {
+  display: flex;
+  gap: 4px;
+}
+
+/* Info Grid */
+.info-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(200px, 1fr));
+  gap: 16px;
+}
+
+.info-card {
+  background: var(--bg-secondary);
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  padding: 16px;
+}
+
+.info-card-label {
+  font-size: 11px;
+  text-transform: uppercase;
+  letter-spacing: 0.5px;
+  color: var(--text-muted);
+  margin-bottom: 6px;
+}
+
+.info-card-value {
+  font-size: 20px;
+  font-weight: 600;
+}
+
+.info-card-value.small {
+  font-size: 14px;
+}
+
+/* Progress bar */
+.progress-bar {
+  height: 6px;
+  background: var(--bg-primary);
+  border-radius: 3px;
+  overflow: hidden;
+  margin-top: 8px;
+}
+
+.progress-bar-fill {
+  height: 100%;
+  border-radius: 3px;
+  transition: width var(--transition);
+}
+
+.progress-bar-fill.success { background: var(--success); }
+.progress-bar-fill.warning { background: var(--warning); }
+.progress-bar-fill.danger { background: var(--danger); }
+
+/* Content Library */
+.content-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(200px, 1fr));
+  gap: 16px;
+}
+
+.content-item {
+  background: var(--bg-card);
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  overflow: hidden;
+  transition: all var(--transition);
+}
+
+.content-item:hover {
+  border-color: var(--border-light);
+}
+
+.content-item-preview {
+  aspect-ratio: 16/9;
+  background: var(--bg-primary);
+  overflow: hidden;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+}
+
+.content-item-preview img {
+  width: 100%;
+  height: 100%;
+  object-fit: cover;
+}
+
+.content-item-preview .video-icon {
+  color: var(--text-muted);
+}
+
+.content-item-body {
+  padding: 10px 12px;
+}
+
+.content-item-name {
+  font-size: 12px;
+  font-weight: 500;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  margin-bottom: 4px;
+}
+
+.content-item-size {
+  font-size: 11px;
+  color: var(--text-muted);
+}
+
+.content-item-actions {
+  display: flex;
+  justify-content: flex-end;
+  padding: 0 12px 10px;
+  gap: 4px;
+}
+
+/* Upload Area */
+.upload-area {
+  border: 2px dashed var(--border);
+  border-radius: var(--radius-lg);
+  padding: 48px 24px;
+  text-align: center;
+  cursor: pointer;
+  transition: all var(--transition);
+  margin-bottom: 24px;
+}
+
+.upload-area:hover,
+.upload-area.dragover {
+  border-color: var(--accent);
+  background: rgba(59, 130, 246, 0.05);
+}
+
+.upload-area svg {
+  margin: 0 auto 12px;
+  color: var(--text-muted);
+}
+
+.upload-area p {
+  color: var(--text-secondary);
+  font-size: 14px;
+}
+
+.upload-area .upload-hint {
+  font-size: 12px;
+  color: var(--text-muted);
+  margin-top: 4px;
+}
+
+/* Modal */
+.modal-overlay {
+  position: fixed;
+  inset: 0;
+  background: rgba(0, 0, 0, 0.6);
+  backdrop-filter: blur(4px);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  z-index: 1000;
+}
+
+.modal {
+  background: var(--bg-secondary);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-lg);
+  width: 440px;
+  max-width: 90vw;
+  box-shadow: var(--shadow);
+  /* Cap to the viewport and lay out as a column so a tall form (e.g. the directory-board
+     widget with many entries) scrolls inside .modal-body while the header/footer stay
+     pinned — otherwise the modal grows past the screen and Save becomes unreachable. */
+  max-height: 90vh;
+  display: flex;
+  flex-direction: column;
+}
+
+.modal-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: 16px 20px;
+  border-bottom: 1px solid var(--border);
+  flex-shrink: 0;
+}
+
+.modal-header h3 {
+  font-size: 16px;
+  font-weight: 600;
+}
+
+.modal-body {
+  padding: 20px;
+  /* Scroll region between the pinned header and footer. min-height:0 lets the flex item
+     shrink below its content so overflow-y actually engages inside the column. */
+  flex: 1 1 auto;
+  min-height: 0;
+  overflow-y: auto;
+}
+
+.modal-description {
+  color: var(--text-secondary);
+  font-size: 13px;
+  margin-bottom: 16px;
+}
+
+.modal-footer {
+  display: flex;
+  justify-content: flex-end;
+  gap: 8px;
+  padding: 16px 20px;
+  border-top: 1px solid var(--border);
+  flex-shrink: 0;
+}
+
+/* Form Elements */
+.form-group {
+  margin-bottom: 16px;
+}
+
+.form-group label {
+  display: block;
+  font-size: 12px;
+  font-weight: 500;
+  color: var(--text-secondary);
+  margin-bottom: 6px;
+}
+
+.input {
+  width: 100%;
+  padding: 8px 12px;
+  background: var(--bg-input);
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  color: var(--text-primary);
+  transition: border-color var(--transition);
+}
+
+.input:focus {
+  outline: none;
+  border-color: var(--accent);
+}
+
+.pairing-input {
+  width: 100%;
+  padding: 12px 16px;
+  background: var(--bg-input);
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  color: var(--text-primary);
+  font-size: 28px;
+  font-weight: 700;
+  text-align: center;
+  letter-spacing: 8px;
+  font-family: 'Courier New', monospace;
+}
+
+.pairing-input:focus {
+  outline: none;
+  border-color: var(--accent);
+}
+
+/* Toast */
+.toast-container {
+  position: fixed;
+  bottom: 24px;
+  right: 24px;
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  z-index: 2000;
+}
+
+.toast {
+  background: var(--bg-card);
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  padding: 12px 16px;
+  min-width: 280px;
+  box-shadow: var(--shadow);
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  animation: slideIn 0.3s ease;
+}
+
+.toast.success { border-left: 3px solid var(--success); }
+.toast.error { border-left: 3px solid var(--danger); }
+.toast.info { border-left: 3px solid var(--accent); }
+
+@keyframes slideIn {
+  from { transform: translateX(100%); opacity: 0; }
+  to { transform: translateX(0); opacity: 1; }
+}
+
+/* Empty State */
+.empty-state {
+  text-align: center;
+  padding: 60px 24px;
+  color: var(--text-muted);
+}
+
+.empty-state svg {
+  margin: 0 auto 16px;
+  opacity: 0.3;
+}
+
+.empty-state h3 {
+  color: var(--text-secondary);
+  margin-bottom: 8px;
+}
+
+.empty-state p {
+  font-size: 13px;
+  max-width: 360px;
+  margin: 0 auto;
+}
+
+/* Settings */
+.settings-section {
+  background: var(--bg-card);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-lg);
+  padding: 24px;
+  margin-bottom: 20px;
+}
+
+.settings-section h3 {
+  font-size: 16px;
+  margin-bottom: 16px;
+}
+
+/* Assign Modal */
+.assign-content-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(150px, 1fr));
+  gap: 12px;
+  max-height: 400px;
+  overflow-y: auto;
+}
+
+.assign-content-item {
+  background: var(--bg-input);
+  border: 2px solid var(--border);
+  border-radius: var(--radius);
+  overflow: hidden;
+  cursor: pointer;
+  transition: all var(--transition);
+}
+
+.assign-content-item:hover {
+  border-color: var(--accent);
+}
+
+.assign-content-item.selected {
+  border-color: var(--accent);
+  box-shadow: 0 0 0 1px var(--accent);
+}
+
+.assign-content-item img {
+  width: 100%;
+  aspect-ratio: 16/9;
+  object-fit: cover;
+}
+
+.assign-content-item-name {
+  padding: 6px 8px;
+  font-size: 11px;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+/* Scrollbar */
+::-webkit-scrollbar {
+  width: 8px;
+  height: 8px;
+}
+
+::-webkit-scrollbar-track {
+  background: transparent;
+}
+
+::-webkit-scrollbar-thumb {
+  background: var(--border);
+  border-radius: 4px;
+}
+
+::-webkit-scrollbar-thumb:hover {
+  background: var(--border-light);
+}
+
+/* Upload progress */
+.upload-progress {
+  margin-top: 16px;
+}
+
+.upload-progress-bar {
+  height: 4px;
+  background: var(--bg-primary);
+  border-radius: 2px;
+  overflow: hidden;
+}
+
+.upload-progress-fill {
+  height: 100%;
+  background: var(--accent);
+  border-radius: 2px;
+  transition: width 0.3s ease;
+}
+
+/* Help tooltips */
+.help-tip {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 18px;
+  height: 18px;
+  border-radius: 50%;
+  background: var(--bg-card);
+  border: 1px solid var(--border);
+  color: var(--text-muted);
+  font-size: 11px;
+  font-weight: 600;
+  cursor: help;
+  position: relative;
+  margin-left: 6px;
+  flex-shrink: 0;
+}
+
+/* A help tip must be reachable without a mouse. :hover alone made every one of these
+   invisible on a tablet or phone — which is a large share of the people administering a
+   signage install — and unreachable by keyboard. Tapping toggles .is-open; focus shows it too. */
+/* The visible marker is 18px, which is fine to look at and far too small to hit with a thumb —
+   about half the ~44px touch guideline. Now that tapping a tip is how touch users read it at
+   all, extend the HIT AREA with a transparent inset overlay rather than inflating the circle,
+   so the target is comfortable without the marker dominating a heading. */
+.help-tip::before {
+  content: '';
+  position: absolute;
+  inset: -13px;
+  border-radius: 50%;
+}
+
+.help-tip:hover::after,
+.help-tip:focus-visible::after,
+.help-tip.is-open::after {
+  content: attr(data-tip);
+  position: absolute;
+  bottom: 100%;
+  left: 50%;
+  transform: translateX(-50%);
+  background: var(--bg-secondary);
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  padding: 8px 12px;
+  font-size: 12px;
+  font-weight: 400;
+  color: var(--text-secondary);
+  white-space: normal;
+  width: 250px;
+  z-index: 1000;
+  box-shadow: var(--shadow);
+  margin-bottom: 6px;
+  line-height: 1.4;
+}
+
+/* Table wrapper: enables horizontal scroll when table min-width exceeds viewport */
+.table-wrap {
+  overflow-x: auto;
+  -webkit-overflow-scrolling: touch;
+}
+
+/* Mobile hamburger toggle */
+.mobile-menu-btn {
+  display: none;
+  position: fixed;
+  top: 12px;
+  left: 12px;
+  z-index: 200;
+  width: 44px;
+  height: 44px;
+  background: var(--bg-secondary);
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  align-items: center;
+  justify-content: center;
+  color: var(--text-primary);
+  cursor: pointer;
+}
+
+/* Responsive */
+@media (max-width: 768px) {
+  .mobile-menu-btn { display: flex; }
+  .sidebar {
+    transform: translateX(-100%);
+    transition: transform 0.3s ease;
+    z-index: 150;
+  }
+  .sidebar.open {
+    transform: translateX(0);
+  }
+  .sidebar-backdrop {
+    display: none;
+    position: fixed;
+    inset: 0;
+    background: rgba(0,0,0,0.5);
+    z-index: 140;
+  }
+  .sidebar-backdrop.open { display: block; }
+  .nav-link { min-height: 44px; padding: 10px 14px; }
+  .main-wrapper { margin-left: 0; }
+  .content { padding: 16px; padding-top: 68px; }
+  .page-header { flex-direction: column; gap: 12px; align-items: flex-start; }
+  .device-grid { grid-template-columns: 1fr; }
+  .content-grid { grid-template-columns: repeat(auto-fill, minmax(150px, 1fr)); }
+  .info-grid { grid-template-columns: 1fr; }
+  .remote-container { flex-direction: column; }
+  .remote-controls { width: 100%; flex-direction: row; flex-wrap: wrap; }
+  /* max-height + scrolling body are now on the base .modal (pinned header/footer); just widen. */
+  .modal { width: 95vw; }
+  .tabs {
+    overflow-x: auto;
+    -webkit-overflow-scrolling: touch;
+    mask-image: linear-gradient(to right, black calc(100% - 24px), transparent 100%);
+    -webkit-mask-image: linear-gradient(to right, black calc(100% - 24px), transparent 100%);
+  }
+  .tab { white-space: nowrap; flex-shrink: 0; }
+  .playlist-item { flex-wrap: wrap; }
+
+  /* Dashboard stats stack to single column */
+  .dash-stats-row { flex-direction: column; }
+  .dash-stats-row .info-card { flex: none; }
+
+  /* Content-library 3-up toolbar stacks vertically */
+  .content-toolbar { flex-direction: column; }
+  .content-toolbar > div[style*="width:320px"] { width: auto !important; }
+
+  /* Schedule controls: allow wrap and widen select to full row */
+  .schedule-controls { gap: 8px; }
+  .schedule-controls > select { flex: 1 1 100%; }
+  .schedule-controls > button,
+  .schedule-controls > span { flex: 0 1 auto; }
+
+  /* Tap targets: minimum 44px height for interactive elements */
+  .btn { min-height: 44px; padding: 10px 16px; }
+  .btn-sm { min-height: 36px; padding: 8px 12px; }
+  .btn-icon { min-width: 40px; min-height: 40px; }
+
+  /* Form inputs: 16px font to prevent iOS focus zoom; 44px tap target */
+  .input,
+  input[type="text"],
+  input[type="email"],
+  input[type="password"],
+  input[type="number"],
+  input[type="url"],
+  input[type="search"],
+  input[type="tel"],
+  select,
+  textarea {
+    font-size: 16px;
+    min-height: 44px;
+  }
+  .pairing-input { font-size: 24px; letter-spacing: 6px; }
+
+  /* Modals: adjust padding at 95vw so content doesn't touch edges */
+  .modal-header,
+  .modal-footer { padding: 14px 16px; }
+  .modal-body { padding: 16px; }
+
+  /* Toast container: full-width bar instead of 280px fixed to right */
+  .toast-container {
+    left: 12px;
+    right: 12px;
+    bottom: 12px;
+  }
+  .toast { min-width: 0; width: 100%; }
+}
+
+@media (max-width: 480px) {
+  .content-grid { grid-template-columns: 1fr; }
+  .assign-content-grid { grid-template-columns: 1fr 1fr; }
+}
+
+
+/* ===================== TRIGGERS DIALOG =====================
+ *
+ * ⚠️ This form used `.modal-backdrop`, which is defined nowhere — so it rendered unstyled and
+ * un-positioned at the end of the page. It now uses the same .modal-overlay/.modal/.modal-header/
+ * .modal-body/.modal-footer skeleton as every other dialog; what follows is only the extra it
+ * genuinely needs, which is a wider shell and the two-column assignment grid.
+ */
+
+/* Wider than the 440px default: this form has paired numeric fields and a two-column assignment
+   grid, and at 440px both wrap into a single column of forty rows. */
+.modal.tg-modal { width: 640px; }
+
+.tg-section { padding-bottom: 4px; margin-bottom: 18px; border-bottom: 1px solid var(--border); }
+.tg-section:last-child { border-bottom: 0; margin-bottom: 0; }
+
+.tg-legend {
+  font-size: 11px;
+  font-weight: 700;
+  letter-spacing: .06em;
+  text-transform: uppercase;
+  color: var(--text-muted);
+  margin: 0 0 10px;
+}
+
+.tg-blurb { font-size: 12px; color: var(--text-secondary); margin: -4px 0 12px; }
+.tg-hint { font-size: 11.5px; color: var(--text-muted); margin-top: 5px; line-height: 1.45; }
+
+/* Paired fields (max duration + lease) sit side by side; they are read together. */
+.tg-row { display: grid; grid-template-columns: 1fr 1fr; gap: 14px; }
+
+.tg-sources { display: flex; gap: 18px; margin-top: 2px; }
+
+.tg-check { display: inline-flex; align-items: center; gap: 7px; font-size: 13px; cursor: pointer; }
+.tg-check input { margin: 0; }
+
+/* Enabled belongs beside Save, not lost in the middle of the form: it is the one control that
+   decides whether any of the rest happens. margin-right:auto pushes the buttons right. */
+.tg-enabled { margin-right: auto; color: var(--text-secondary); }
+
+.tg-empty {
+  font-size: 12.5px;
+  line-height: 1.5;
+  color: var(--text-secondary);
+  background: var(--bg-input);
+  border: 1px dashed var(--border);
+  border-radius: var(--radius);
+  padding: 12px 14px;
+}
+
+.tg-col { font-size: 12px; font-weight: 600; color: var(--text-secondary); margin: 0 0 8px; }
+
+.assign-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 20px; }
+
+/* The assignment lists can be long — a hundred screens is normal — so each column scrolls rather
+   than pushing Save out of reach. */
+.assign-grid > div { max-height: 210px; overflow-y: auto; padding-right: 4px; }
+.assign-grid label {
+  display: flex; align-items: center; gap: 8px;
+  font-size: 13px; padding: 4px 0; cursor: pointer;
+}
+.assign-grid label input { margin: 0; flex-shrink: 0; }
+
+@media (max-width: 700px) {
+  .tg-row, .assign-grid { grid-template-columns: 1fr; }
+}

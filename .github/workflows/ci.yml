@@ -1,0 +1,351 @@
+name: CI
+
+on:
+  push:
+    # ⚠️ 2.0.0 IS LISTED ON PURPOSE. CI ran only on main and on PRs targeting it, so a long-lived
+    # release branch accumulated commits with no suite behind them — and this project has already
+    # been bitten twice by that shape: a green local run on one Node version while CI runs another,
+    # and a config-gated code path no test exercised taking production down. A branch nobody tests
+    # is a branch nobody can trust to merge.
+    branches: [main, 2.0.0]
+  pull_request:
+    branches: [main, 2.0.0]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+# main gets frequent pushes - cancel an in-flight run when a newer commit
+# (or rerun) supersedes it, per ref.
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  test:
+    name: Unit tests (node --test)
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: server
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          # The player-parity baselines judge a claim against the SHIPPED source
+          # (`git show <latest tag>:…`), because a baseline describes what an
+          # UN-UPDATED display can do. The default shallow checkout has no tags, so
+          # the suite silently fell back to the working tree and the biconditionals
+          # inverted: fixing a player's payload bug made CI demand a baseline change
+          # for displays that cannot possibly have the fix yet. Green locally, red
+          # here, for a reason found nowhere in the diff.
+          fetch-depth: 0
+      - uses: actions/setup-node@v6
+        with:
+          node-version: '20'
+          cache: npm
+          cache-dependency-path: server/package-lock.json
+      - run: npm ci
+      - run: npm test
+
+  # ⚠️ THE PLAYER'S DATABASE LAYER, ACTUALLY EXECUTED.
+  #
+  # db/sqlite-driver.js picks better-sqlite3 when it loads and node:sqlite otherwise. The job above
+  # only ever exercises the first branch, and the second is what every BrightSign player runs — the
+  # package used to be MANUFACTURED by the packager, so its database layer shipped having never been
+  # run by any test. That is the same shape as the TELEMETRY_COLLECTOR crash that took production
+  # down with 1676 tests green.
+  #
+  # Node 24 because node:sqlite is unflagged only from 23.4; on 22.x it needs --experimental-sqlite
+  # and on the 20.x the job above uses it does not exist at all. The driver is then forced by env
+  # var rather than by omitting the native module — see the install step for why that reversed.
+  unit-node-sqlite:
+    name: Unit tests (node:sqlite fallback, Node 24)
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: server
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          fetch-depth: 0
+      - uses: actions/setup-node@v6
+        with:
+          node-version: '24'
+          cache: npm
+          cache-dependency-path: server/package-lock.json
+      # ⚠️ THE FULL TREE, then force the driver — NOT --omit=optional.
+      #
+      # The first version of this job installed without the native module, on the reasoning that a
+      # player has none. It failed instantly with 60 x "Cannot find module 'better-sqlite3'", because
+      # the TESTS require it directly as a harness to inspect the database they are asserting about.
+      # Removing it tests nothing except the test files.
+      #
+      # Forcing the driver is also the stronger check: the server under test runs on node:sqlite
+      # while the harness reads the same files with the native driver, so a divergence between the
+      # two shows up as a failing assertion rather than as agreement between one driver and itself.
+      - run: npm ci
+      - name: Confirm the fallback really is what the server picks here
+        run: |
+          node -e "const d=require('./db/sqlite-driver'); console.log(d.driverName);
+                   if (d.driverName !== 'node:sqlite') { console.error('expected the fallback, got ' + d.driverName); process.exit(1); }"
+        env:
+          ST_SQLITE_DRIVER: node
+      # ⚠️ A PILE OF FAILED *FILES* WITH NO FAILED ASSERTION IS A CRASH, NOT A TEST FAILURE.
+      #
+      # This job — and only this job, because only this job runs Node 24 — intermittently reports
+      # unrelated test files as failed with nothing but 'test failed' and no assertion text. The
+      # test bodies all passed; the PROCESS died, and `node --test` has no better word for that.
+      #
+      #   node[2508]: void node::RemoveEnvironmentCleanupHook(v8::Isolate*, CleanupHook, void*)
+      #   Assertion failed: (env) != nullptr
+      #    3: Statement::~Statement()  [server/node_modules/better-sqlite3/build/Release/...]
+      #
+      # Upstream, open, no fix: WiseLibs/better-sqlite3#1515 "Intermittent ObjectWrap cleanup abort
+      # during Statement GC on Node 24". better-sqlite3's Statement extends node::ObjectWrap; V8's
+      # weak callback destroys it DURING GC at a moment when the isolate has no current Node
+      # Environment, so Node's own assertion aborts the process. Mid-run, not at exit — which is why
+      # it hits a different, arbitrary set of files each time.
+      #
+      # BEFORE BLAMING YOUR DIFF, count them:
+      #
+      #   gh run view <id> --log | grep -c "Assertion failed: (env) != nullptr"
+      #
+      # One abort per ✖ file means every "failure" is this and your diff is innocent. On 2026-08-20
+      # that read 12 aborts / 12 files. ⚠️ Scope it from the FULL log, not `--log-failed`, whose tail
+      # is truncated — it listed 6 of the 12 and sent me looking for a common cause among six files
+      # that did not have one.
+      #
+      # What it is NOT, so nobody re-derives it: not the diff (the victims are whichever of the 59
+      # test files that require('better-sqlite3') directly as a harness get caught by GC); not a
+      # missing db.close() (branding.test.js closes and aborts anyway); not a Node bump (green and
+      # red runs both resolved 24.19.0); and it does not reproduce locally — CI-identical, this suite
+      # runs 2111/2111 with zero aborts. It needs a 4-core runner's GC timing.
+      #
+      # Re-run the job. The real fix is better-sqlite3 13.x, which moved to the N-API and structurally
+      # deletes the ObjectWrap path that aborts — but the 12.9.0 pin is exact on purpose (see
+      # CHANGELOG) and it is the last native dep on every production server, so that is a deliberate
+      # upgrade with its own validation, not a drive-by. Production and every other job run Node 20,
+      # where this has never appeared.
+      - run: npm test
+        env:
+          ST_SQLITE_DRIVER: node
+
+  openapi:
+    name: OpenAPI spec lint
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v6
+      - uses: actions/setup-node@v6
+        with:
+          node-version: '20'
+      - name: Lint the public API spec
+        run: npx --yes @redocly/cli@latest lint docs/openapi.yaml
+      # Contract integrity: the spec documents ONLY the token-reachable public surface.
+      # A JWT-only router (admin/auth/provision/...) appearing here is a security flag,
+      # not a convenience - fail loudly. (The runtime partition test is a separate suite
+      # that will cross-check the spec against the live mount list.)
+      - name: Assert spec is public-only
+        run: |
+          BAD=$(grep -oE '^  /(admin|auth|workspaces|ai|provision|white-label|status|subscription|stripe|teams|player-debug|contact|tokens)\b' docs/openapi.yaml || true)
+          if [ -n "$BAD" ]; then echo "::error::JWT-only path(s) leaked into the public spec:"; echo "$BAD"; exit 1; fi
+          if grep -qE 'unassigned|/prune' docs/openapi.yaml; then echo "::error::token-denied endpoint present in public spec"; exit 1; fi
+          echo "OK: spec is public-only"
+
+  android-test:
+    name: Android unit tests (Kotlin schedule evaluator vectors)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v6
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '17'
+          # Cache ~/.gradle/caches AND ~/.gradle/wrapper. The wrapper cache holds the
+          # Gradle distribution (gradle-8.5-bin.zip); without it every run re-downloaded
+          # ~130MB from services.gradle.org, and a transient reset there failed the job
+          # before any test ran (org.gradle.wrapper.Install.forceFetch). On a cache hit the
+          # distribution is already present, so the download — and its flake — is skipped.
+          cache: gradle
+      - uses: android-actions/setup-android@v3
+      # ScheduleEvalTest reads the SHARED shared/schedule-vectors.json (wired via
+      # the test task in app/build.gradle.kts), so a ScheduleEval.kt change that
+      # breaks the contract fails here.
+      - name: Kotlin evaluator vector conformance
+        working-directory: android
+        run: ./gradlew :app:testDebugUnitTest --no-daemon
+
+      # Every artifact that can enter the APK must have a licence on file. This runs here
+      # rather than in its own job because the Gradle cache and Android SDK are already warm.
+      - name: Licence gate (APK runtime classpath)
+        run: node scripts/android-license-check.js
+
+  licenses:
+    name: Licence gate + SBOM (production deps)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v6
+      - uses: actions/setup-node@v6
+        with:
+          node-version: '20'
+          cache: npm
+          cache-dependency-path: server/package-lock.json
+
+      # --omit=dev on purpose, and it is the whole point of the job. A developer checkout
+      # carries sharp, whose @img/sharp-wasm32 declares LGPL-3.0-or-later; it is a test
+      # fixture generator that never reaches a server. Auditing anything other than a
+      # production install would report a licence we do not actually ship.
+      - name: Install production dependencies only
+        working-directory: server
+        run: npm ci --omit=dev
+
+      - name: Licence gate
+        run: node scripts/license-check.js --sbom sbom/screentinker-server.cdx.json
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: sbom
+          path: sbom/
+          if-no-files-found: error
+
+  smoke:
+    name: Boot smoke + version check
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v6
+      - uses: actions/setup-node@v6
+        with:
+          node-version: '20'
+          cache: npm
+          cache-dependency-path: server/package-lock.json
+
+      - name: Install deps
+        working-directory: server
+        run: npm ci
+
+      # Boot against a fresh SQLite db (clean checkout = no db yet). SELF_HOSTED
+      # makes the first user an admin with no billing. No certs present, so the
+      # server listens on plain HTTP at :3001. Background it and wait until it
+      # answers.
+      - name: Boot server
+        working-directory: server
+        env:
+          SELF_HOSTED: 'true'
+          # Boot WITH the collector on. This block is config-gated and only the
+          # statistics-collecting deployment sets the flag, so it had never executed in CI,
+          # on alpha, or in any test - and a load-time crash inside it took production down
+          # while every check was green. Code only one deployment runs is exactly the code
+          # CI has to execute.
+          TELEMETRY_COLLECTOR: '1'
+        run: |
+          node server.js > "$RUNNER_TEMP/server.log" 2>&1 &
+          echo $! > "$RUNNER_TEMP/server.pid"
+          for i in $(seq 1 30); do
+            curl -sf http://localhost:3001/api/status >/dev/null && exit 0
+            sleep 1
+          done
+          echo "server did not come up within 30s:"; cat "$RUNNER_TEMP/server.log"; exit 1
+
+      # Assert the public status endpoint is healthy and reports exactly the
+      # VERSION file - this is what proves the single-source-of-truth wiring.
+      - name: Assert /api/status ok and version matches VERSION
+        run: |
+          STATUS="$(curl -sf http://localhost:3001/api/status)"
+          echo "status: $STATUS"
+          EXPECTED="$(cat VERSION)"
+          REPORTED="$(echo "$STATUS" | jq -r .version)"
+          echo "VERSION file: $EXPECTED   reported: $REPORTED"
+          test "$(echo "$STATUS" | jq -r .status)" = "ok"
+          test "$REPORTED" = "$EXPECTED"
+          echo "OK: status ok, version $REPORTED matches VERSION"
+
+      # Booting is not enough on its own - the collector could be mounted and broken. Prove
+      # the routes it adds actually answer, so a fault inside that block fails here rather
+      # than on the single deployment that turns it on.
+      - name: Assert the collector routes answer when enabled
+        run: |
+          STATS="$(curl -sf http://localhost:3001/api/public/stats)"
+          echo "stats: $STATS"
+          test "$(echo "$STATS" | jq -r 'has("screens") and has("installs")')" = "true"
+          REPORT="$(curl -s -o /dev/null -w '%{http_code}' -X POST \
+            -H 'Content-Type: application/json' -d '{"bad":1}' \
+            http://localhost:3001/api/telemetry/report)"
+          echo "malformed report -> HTTP $REPORT"
+          test "$REPORT" = "400"
+          echo "OK: collector mounted and answering"
+
+      # "Off by default" is the central safety claim of the 2.0.0 mesh: an install that never sets
+      # the flags should be indistinguishable from 1.9.x, with no routes rather than routes that
+      # answer emptily. Nothing enforced it, so a refactor that mounted /api/mesh unconditionally
+      # would have kept every test green while quietly giving every install a new API surface.
+      #
+      # 404 vs 401 is the discriminator, and it needs no credentials: unmounted answers
+      # {"error":"Not found"}, mounted answers {"error":"Authentication required"}.
+      - name: Assert the mesh is ABSENT when the flags are unset
+        run: |
+          CODE="$(curl -s -o /dev/null -w '%{http_code}' http://localhost:3001/api/mesh/nodes)"
+          echo "/api/mesh/nodes with no MESH_* set -> HTTP $CODE (want 404)"
+          test "$CODE" = "404"
+          echo "OK: no mesh surface on a default install"
+
+      - name: Stop server
+        if: always()
+        run: |
+          PID="$(cat "$RUNNER_TEMP/server.pid" 2>/dev/null || true)"
+          [ -n "$PID" ] || exit 0
+          kill "$PID" 2>/dev/null || true
+          # Wait for it to actually go. The step below used to boot on the same port while this
+          # one was still listening, and its readiness probe was answered by THIS server — so the
+          # mesh assertion tested the wrong process and read 404 from a mesh-off install.
+          for i in $(seq 1 20); do kill -0 "$PID" 2>/dev/null || exit 0; sleep 0.5; done
+          kill -9 "$PID" 2>/dev/null || true
+
+      # ⚠️ AND NOW BOOT IT WITH THE FLAGS ON.
+      #
+      # Same reasoning as TELEMETRY_COLLECTOR above, and the mesh is now the bigger instance of it:
+      # ~19k lines that only a deployment which opts in ever loads. The collector taught this the
+      # expensive way — a load-time crash inside a config-gated block took production down with
+      # every check green. The boot above deliberately runs the prod configuration (flags unset),
+      # which means it can never execute any of this. So boot it a second time.
+      #
+      # ⚠️ ITS OWN PORT AND ITS OWN DATA_DIR, not 3001 again. Sharing the port means a readiness
+      # probe can be satisfied by the server that is supposed to be gone, which is how the first
+      # version of this step passed its boot and then read 404 off the PREVIOUS process. A port
+      # nothing else can be listening on makes "it answered" mean "this server answered".
+      - name: Boot server with the mesh ON
+        working-directory: server
+        env:
+          SELF_HOSTED: 'true'
+          PORT: '3002'
+          MESH_ACCEPT_ENROLLMENT: '1'
+          MESH_ALLOW_UPLINK: '1'
+        run: |
+          export DATA_DIR="$RUNNER_TEMP/mesh-data"
+          mkdir -p "$DATA_DIR"
+          node server.js > "$RUNNER_TEMP/server-mesh.log" 2>&1 &
+          echo $! > "$RUNNER_TEMP/server-mesh.pid"
+          for i in $(seq 1 30); do
+            curl -sf http://localhost:3002/api/status >/dev/null && exit 0
+            sleep 1
+          done
+          echo "server did not come up with the mesh on:"; cat "$RUNNER_TEMP/server-mesh.log"; exit 1
+
+      # Booting is not enough on its own — the routes could be mounted and broken, which is exactly
+      # what the collector step below the first boot exists to catch. 401 proves the router is
+      # really mounted and reached; 404 would mean the flag did not take.
+      - name: Assert the mesh surface answers when enabled
+        run: |
+          CODE="$(curl -s -o /dev/null -w '%{http_code}' http://localhost:3002/api/mesh/nodes)"
+          echo "/api/mesh/nodes with MESH_ACCEPT_ENROLLMENT=1 -> HTTP $CODE (want 401, i.e. mounted)"
+          test "$CODE" = "401"
+          grep -q "\[mesh\] hub API mounted" "$RUNNER_TEMP/server-mesh.log" \
+            || { echo "server never logged the hub API mount:"; cat "$RUNNER_TEMP/server-mesh.log"; exit 1; }
+          echo "OK: mesh mounted and answering"
+
+      - name: Stop the mesh server
+        if: always()
+        run: kill "$(cat "$RUNNER_TEMP/server-mesh.pid")" 2>/dev/null || true
+
+  # TODO (deferred - needs a tag earlier than HEAD, so meaningful from v1.8.0 on):
+  # upgrade-path job. Restore a db created by the previous tagged release, boot
+  # the current code against it, and assert migrations complete and /api/status
+  # is healthy. Add once a prior release tag exists.

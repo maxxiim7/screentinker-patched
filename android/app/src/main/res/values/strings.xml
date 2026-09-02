@@ -1,0 +1,48 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <string name="app_name">RemoteDisplay</string>
+    <string name="accessibility_description">RemoteDisplay uses accessibility to enable remote power controls and system navigation.</string>
+    <string name="device_admin_description">Lets ScreenTinker run as an unattended kiosk: silent updates, scheduled reboot, lock-task, and time/display control. Optional — the app works without it.</string>
+    <string name="nothing_scheduled">Nothing scheduled right now</string>
+    <string name="waiting_for_content">Waiting for content…</string>
+
+    <!-- Hidden settings menu (triggered by 2x BACK or ESC, PIN-gated) -->
+    <string name="settings_pin_title">Enter PIN</string>
+    <string name="settings_pin_wrong">Wrong PIN</string>
+    <string name="settings_pin_hint">PIN</string>
+    <string name="settings_title">Settings</string>
+    <string name="settings_change_server">Change server URL</string>
+    <string name="settings_reconfigure">Reconfigure device (re-pair)</string>
+    <string name="settings_device_info">Device info</string>
+    <string name="settings_hardware_control">Hardware control</string>
+    <string name="hw_tier_owner">Tier 2 — device owner (full control)</string>
+    <string name="hw_tier_admin">Tier 1 — device admin (screen lock only)</string>
+    <string name="hw_tier_none">Tier 0 — standard (no system control)</string>
+    <string name="hw_tier_managed">Managed by another device owner (MDM)</string>
+    <string name="hw_owner_note">This panel is device owner: silent updates, reboot, kiosk lock-task, and time control are available.</string>
+    <string name="hw_managed_note">Another app (an MDM/DPC) is the device owner, so ScreenTinker runs at Tier 0/1. The MDM owns updates and system control.</string>
+    <string name="hw_enroll_intro">To unlock silent updates, reboot, kiosk, and time control, enroll this panel as device owner over ADB (fresh / factory-reset device, no accounts, USB debugging on):</string>
+    <string name="hw_enroll_constraints">Or scan the provisioning QR from the dashboard after a factory reset (tap the setup-wizard Welcome screen 6×). Device owner is optional — the app works fully without it.</string>
+    <string name="hw_recheck">Re-check</string>
+    <string name="settings_info_device">Device</string>
+    <string name="settings_exit_kiosk">Exit kiosk mode</string>
+    <string name="settings_exit_kiosk_done">Kiosk mode off. It stays off until re-enabled from the dashboard.</string>
+    <string name="settings_exit">Exit app</string>
+    <string name="settings_save">Save</string>
+    <string name="settings_exit_title">Exit ScreenTinker?</string>
+    <string name="settings_exit_confirm">The app will stop displaying content. You can reopen it later from the app launcher.</string>
+    <string name="settings_exit_yes">Exit</string>
+    <string name="settings_connection_failed">Can\'t reach the server</string>
+    <string name="settings_connection_hint">Press BACK twice for settings</string>
+
+    <!-- Permissions -->
+    <string name="settings_permissions">Permissions</string>
+    <string name="settings_perm_accessibility">Accessibility</string>
+    <string name="settings_perm_notifications">Notifications</string>
+    <string name="settings_perm_hint">Tap \"Open\" to manage permissions in system settings</string>
+    <string name="settings_perm_open">Open settings</string>
+    <string name="settings_perm_done">Done</string>
+    <string name="settings_perm_manage">Manage permissions</string>
+    <string name="device_blocked_status">This screen has been blocked in the dashboard</string>
+    <string name="device_unpaired_status">This screen was unpaired — waiting to be re-paired</string>
+</resources>

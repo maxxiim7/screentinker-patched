@@ -1,0 +1,109 @@
+const setupDeviceSocket = require('./deviceSocket');
+const setupDashboardSocket = require('./dashboardSocket');
+
+module.exports = function setupWebSockets(io) {
+  const deviceNs = setupDeviceSocket(io);
+  const dashboardNs = setupDashboardSocket(io);
+
+  /*
+   * ⚠️ THE MESH NAMESPACE IS NOT CREATED UNLESS THE FLAG IS ON.
+   *
+   * Not a disabled handler, not one that returns early — required and registered only when
+   * MESH_ACCEPT_ENROLLMENT is set. With the flag off there is no /mesh endpoint to reach and no code
+   * loaded, which is what "a user who never sets it must not be able to tell the mesh exists" means
+   * in practice (I1). An early-returning handler would still answer the socket and still be a surface.
+   *
+   * Required INSIDE the branch for the same reason: a top-level require would load the transport,
+   * its client library and the backpressure accounting into every ordinary install's memory to do
+   * nothing.
+   */
+  let meshNs = null;
+  const config = require('../config');
+  if (config.meshAcceptEnrollment) {
+    try {
+      const setupMeshSocket = require('./meshSocket');
+      const store = require('../lib/mesh/store');
+      const mirrorStore = require('../lib/mesh/mirror-store');
+      const { db } = require('../db/database');
+
+      const thisNodeId = store.ensureNodeIdentity(db);
+      if (!thisNodeId) {
+        console.warn('[mesh] MESH_ACCEPT_ENROLLMENT is set but this node has no identity yet — ' +
+                     'the mesh tables are missing. Skipping the mesh listener.');
+      } else {
+        meshNs = setupMeshSocket(io, {
+          thisNodeId,
+          acceptEnrollment: () => true,
+          findEdgeByTokenHash: (hash) => store.findEdgeByTokenHash(db, hash),
+          // Re-read per envelope so revocation and token expiry take effect on a socket that is
+          // already open — see the note in meshSocket.js.
+          reloadEdge: (edgeId) => store.reloadEdge(db, edgeId),
+          /*
+           * ⚠️ WRAPPED, AND THE EDGE IS TOUCHED FIRST. A storage failure — a disk full, a constraint
+           * we did not anticipate from a newer child — must not make the node look unreachable as
+           * well. Recording that we HEARD from it is true regardless of whether we managed to keep
+           * what it said, and conflating the two would show a healthy site as offline (I6).
+           */
+          onEnvelope: (edge, env, meta) => {
+            store.touchEdge(db, edge.id);
+            if (meta && meta.relayOnly) return;   // I5: relayed, not interpreted, not stored
+
+            /*
+             * ⚠️ A BATCH IS APPLIED IN ONE TRANSACTION, and its items IN ORDER.
+             *
+             * One transaction because four hundred separate writes mean four hundred fsyncs, which
+             * is most of what batching set out to save. In order because a tombstone followed by an
+             * upsert for the same screen must land that way round — as a set, the screen comes back
+             * deleted.
+             *
+             * Validation already happened per item upstream, so everything here is known-good: the
+             * transaction cannot roll back a good item because of a bad neighbour, since bad
+             * neighbours never reached it.
+             */
+            if (meta && Array.isArray(meta.batch)) {
+              try {
+                db.transaction(() => {
+                  for (const item of meta.batch) mirrorStore.storeEnvelope(db, edge, item);
+                })();
+              } catch (e) {
+                console.warn(`[mesh] could not store a batch from ${edge.peer_node_id}: ${e && e.message}`);
+              }
+              return;
+            }
+
+            try {
+              mirrorStore.storeEnvelope(db, edge, env);
+            } catch (e) {
+              console.warn(`[mesh] could not store ${env && env.type} from ${edge.peer_node_id}: ${e && e.message}`);
+            }
+          },
+        });
+        /*
+         * ⚠️ Published so the HTTP layer can ask a child for its live data. The socket is the only
+         * path: the child dialled out because it may have no inbound route at all, which is the
+         * deployment shape this feature exists for.
+         */
+        if (meshNs && meshNs.readFrom) {
+          global.__meshReadFrom = meshNs.readFrom;
+          // Same publication as the read side: routes reach the live socket layer through this
+          // rather than importing it, because the sockets are constructed after routes are mounted.
+          global.__meshWriteTo = meshNs.writeTo;
+          // Same publication, same reason. Content moves over HTTP; this is how the OFFER reaches a
+          // child that dialled out and may have no inbound route of its own.
+          global.__meshContentOfferTo = meshNs.contentOfferTo;
+          global.__meshContentPurgeTo = meshNs.contentPurgeTo;
+        }
+        console.log(`[mesh] listening for child nodes as ${thisNodeId}`);
+      }
+    } catch (e) {
+      /*
+       * ⚠️ The mesh must never be the reason a server fails to boot. It is an optional observer
+       * relationship; the node's own job — scheduling, playback, its local dashboard — is unaffected
+       * by it being unavailable (I1).
+       */
+      console.warn(`[mesh] listener not started: ${e && e.message}`);
+    }
+  }
+
+  return { deviceNs, dashboardNs, meshNs };
+};

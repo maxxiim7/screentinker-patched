@@ -1,0 +1,9 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <string name="app_name">RemoteDisplay</string>
+    <string name="accessibility_description">RemoteDisplay usa accesibilidad para habilitar el control remoto de encendido y la navegación del sistema.</string>
+    <string name="nothing_scheduled">No hay nada programado en este momento</string>
+    <string name="waiting_for_content">Esperando contenido…</string>
+    <string name="device_blocked_status">Esta pantalla ha sido bloqueada en el panel</string>
+    <string name="device_unpaired_status">Esta pantalla se desvinculó — esperando volver a vincularse</string>
+</resources>

@@ -1,0 +1,65 @@
+{
+  "_comment": [
+    "USER-FACING release notes, shown in the app: a 'What's new' panel on the dashboard the first",
+    "time someone signs in after the running version changes, and the full list under Settings -> About.",
+    "",
+    "THIS IS NOT CHANGELOG.md, AND IT MUST NOT BECOME IT. The changelog is written for whoever",
+    "touches the code next and is full of issue numbers, SQL and event-loop arguments. This file is",
+    "read by an operator who just wants to know whether anything they do changed. Three to five",
+    "bullets, plain language, no issue numbers, no internals, no marketing.",
+    "",
+    "Every released version needs an entry: test/release-notes.test.js fails the build if the",
+    "version in VERSION has none, which is what stops this file quietly rotting. Newest first.",
+    "'date' is the release date in YYYY-MM-DD."
+  ],
+  "releases": [
+    {
+      "version": "2.0.4",
+      "date": "2026-09-02",
+      "notes": [
+        "Screens that were refused by the server now come back on their own. A display could get stuck showing “Waiting for content” with everything already downloaded, and only start again if you changed its playlist by hand. That is fixed, on every kind of screen.",
+        "Upgrading a busy server no longer leaves browser and Samsung screens stuck on a maintenance message until somebody power-cycles them.",
+        "Large installs should feel noticeably lighter. A repair job that ran every time any screen changed item now runs once when a screen reconnects, which is the only time it can find anything to repair.",
+        "An Android screen with a full offline cache will now play it after an update, instead of waiting for content it already had. Screens also keep their offline copy when the server sends an empty playlist, so a reboot no longer leaves them with nothing.",
+        "Platform admins get a new Diagnostics panel: how the server has been performing day by day, how big the installation is, and a one-click CPU profile to send to support. No shell access needed."
+      ]
+    },
+    {
+      "version": "2.0.3",
+      "date": "2026-09-01",
+      "notes": [
+        "Tightens who can read a display’s web player key. It was already hidden from the display list, and is now also withheld from API tokens — so an integration with read access cannot pick up a key that would let it act as that screen. Your own dashboard still shows it."
+      ]
+    },
+    {
+      "version": "2.0.2",
+      "date": "2026-09-01",
+      "notes": [
+        "Fixes the What’s New panel, which was blank after upgrading to 2.0.1. The notes it reads were missing from the packaged install, so there was nothing to show. Nothing else changed."
+      ]
+    },
+    {
+      "version": "2.0.1",
+      "date": "2026-09-01",
+      "notes": [
+        "Slides can talk. A slide can carry a voiceover and a deck can carry background music that plays underneath the whole thing, on every kind of screen — and audio files can now be uploaded, which the content library used to refuse. Screens stay silent unless you ask for sound.",
+        "Slides keep the shape you designed them in. A deck laid out as widescreen no longer stretches to fit a taller or wider screen, which used to crop the background and push headlines off the edge. It is centred at its own shape instead, and text on older Android screens is finally the size you set.",
+        "Setup now leaves a screen actually playing. The last step asks what the display should play and offers the playlists you already have, and content uploaded during setup is published rather than left as a draft on a blank screen. The checklist follows you through it.",
+        "A first start no longer gets overwhelmed by its own screens. On large installs the server finishes its upgrade work before letting displays reconnect, and says what it is doing while it works — so a slow disk looks slow rather than broken.",
+        "Displays can be given a web player URL, for players that lose their storage when they restart — a browser input in vMix, for instance, which used to come back as a brand new display every time it was reopened. It is off unless you ask for it."
+      ]
+    },
+    {
+      "version": "2.0.0",
+      "date": "2026-08-28",
+      "notes": [
+        "Slides: a proper editor for text, numbers, photos, clocks and QR codes, where the wording and the layout are separate — so changing a headline months later does not disturb the design.",
+        "Triggers: a screen can switch to different content on a signal, and switch back afterwards.",
+        "Playlists can contain other playlists, and a screen can inherit its playlist from its group or video wall.",
+        "Multi-site: link separate servers so one dashboard can see screens at other locations.",
+        "Play reporting survives an outage — a player records what it showed while offline and sends it once it reconnects.",
+        "Workspaces and single sign-on, for teams that need separate spaces or a company login."
+      ]
+    }
+  ]
+}

@@ -1,0 +1,9 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <string name="app_name">RemoteDisplay</string>
+    <string name="accessibility_description">RemoteDisplay utilise l\'accessibilité pour activer les contrôles d\'alimentation à distance et la navigation système.</string>
+    <string name="nothing_scheduled">Rien de programmé pour le moment</string>
+    <string name="waiting_for_content">En attente de contenu…</string>
+    <string name="device_blocked_status">Cet écran a été bloqué dans le tableau de bord</string>
+    <string name="device_unpaired_status">Cet écran a été dissocié — en attente d\'un nouvel appairage</string>
+</resources>

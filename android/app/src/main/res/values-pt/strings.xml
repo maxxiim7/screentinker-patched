@@ -1,0 +1,9 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <string name="app_name">RemoteDisplay</string>
+    <string name="accessibility_description">RemoteDisplay usa acessibilidade para habilitar controles remotos de energia e navegação do sistema.</string>
+    <string name="nothing_scheduled">Nada programado no momento</string>
+    <string name="waiting_for_content">Aguardando conteúdo…</string>
+    <string name="device_blocked_status">Este ecrã foi bloqueado no painel</string>
+    <string name="device_unpaired_status">Este ecrã foi desemparelhado — a aguardar novo emparelhamento</string>
+</resources>

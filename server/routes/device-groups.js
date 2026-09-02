@@ -1,0 +1,457 @@
+const express = require('express');
+const router = express.Router();
+const { v4: uuidv4 } = require('uuid');
+const { db } = require('../db/database');
+const { PLATFORM_ROLES, ELEVATED_ROLES } = require('../middleware/auth');
+// Phase 2.2i: workspace-aware access. Same pattern as devices/content/widgets.
+const { accessContext } = require('../lib/tenancy');
+// #public-api: operational fleet commands (reboot/shutdown/...) need the 'full' token
+// scope. No-op for JWT sessions; for tokens a read/write scope is rejected.
+const { requireScope } = require('../middleware/apiToken');
+const { resolveSyncBackend, BACKENDS } = require('../lib/sync-backend');
+const playerCapabilities = require('../lib/player-capabilities');
+const { resolveItemDuration } = require('../lib/item-duration');
+const { resolveDevicePlaylistId, clearInheritedCopy } = require('../lib/resolve-device-playlist');
+const { stripDeviceSecretsForList } = require('../lib/device-sanitize');
+
+const VALID_COLOR = /^#[0-9A-Fa-f]{6}$/;
+// ⚠️ Moved to lib/device-command.js — this list and the delivery logic below existed in three
+// places and had already drifted (the socket path queued for an offline device; this one did not).
+const { ALLOWED_COMMANDS, deliverCommand } = require('../lib/device-command');
+
+// Phase 2.2i: split read/write access checks. Both attach req.group on success.
+function loadGroupAccessCtx(req, res) {
+  const group = db.prepare('SELECT * FROM device_groups WHERE id = ?').get(req.params.id);
+  if (!group) { res.status(404).json({ error: 'group not found' }); return null; }
+  if (!group.workspace_id) { res.status(403).json({ error: 'Group not assigned to a workspace' }); return null; }
+  const ws = db.prepare('SELECT * FROM workspaces WHERE id = ?').get(group.workspace_id);
+  const ctx = ws && accessContext(req.user.id, req.user.role, ws);
+  if (!ctx) { res.status(403).json({ error: 'Access denied' }); return null; }
+  return { group, ctx };
+}
+
+function requireGroupRead(req, res, next) {
+  const access = loadGroupAccessCtx(req, res);
+  if (!access) return;
+  req.group = access.group;
+  next();
+}
+
+function requireGroupWrite(req, res, next) {
+  const access = loadGroupAccessCtx(req, res);
+  if (!access) return;
+  if (!access.ctx.actingAs && access.ctx.workspaceRole === 'workspace_viewer') {
+    return res.status(403).json({ error: 'Read-only access' });
+  }
+  req.group = access.group;
+  next();
+}
+
+// What the group's sync_backend setting actually RESOLVES to, for the dashboard. The stored value
+// is only a request: 'brightsign' on a mixed fleet, or on players spread across subnets, is refused
+// by the resolver. Sending the decision alongside the request is what lets the UI explain the
+// refusal instead of showing a setting that quietly isn't in force.
+function syncDecisionFor(group) {
+  if (!group?.playlist_id) return { sync_effective: null, sync_reason: null, sync_downgraded: false };
+  // Resolved playlist, matching ws/deviceSocket.js's groupSyncMembers exactly. Reading the raw
+  // column here would report "sync off / downgraded" for a group whose members all inherit — the
+  // dashboard explaining a refusal that never happened.
+  const members = db.prepare(`
+    SELECT d.id, d.platform, d.ip_address FROM devices d
+    JOIN device_group_members dgm ON dgm.device_id = d.id
+    JOIN device_resolved_playlist r ON r.device_id = d.id
+    WHERE dgm.group_id = ? AND r.playlist_id = ?
+  `).all(group.id, group.playlist_id);
+  const d = resolveSyncBackend(group.sync_backend, members);
+  return { sync_effective: d.backend, sync_reason: d.reason, sync_downgraded: d.downgraded };
+}
+
+// List groups in the caller's current workspace.
+router.get('/', (req, res) => {
+  if (!req.workspaceId) return res.json([]);
+  const groups = db.prepare(`
+    SELECT g.*, COUNT(dgm.device_id) as device_count
+    FROM device_groups g
+    LEFT JOIN device_group_members dgm ON g.id = dgm.group_id
+    WHERE g.workspace_id = ?
+    GROUP BY g.id
+    ORDER BY g.name ASC
+  `).all(req.workspaceId);
+  res.json(groups.map(g => ({ ...g, ...syncDecisionFor(g) })));
+});
+
+// Create group in the caller's current workspace.
+router.post('/', (req, res) => {
+  if (!req.workspaceId) return res.status(403).json({ error: 'No workspace context. Switch to a workspace before creating groups.' });
+  const { name, color } = req.body;
+  if (!name) return res.status(400).json({ error: 'name required' });
+  if (color && !VALID_COLOR.test(color)) return res.status(400).json({ error: 'invalid color format, use #RRGGBB' });
+  const id = uuidv4();
+  db.prepare('INSERT INTO device_groups (id, user_id, workspace_id, name, color) VALUES (?, ?, ?, ?, ?)')
+    .run(id, req.user.id, req.workspaceId, name, color || '#3B82F6');
+  res.status(201).json(db.prepare('SELECT * FROM device_groups WHERE id = ?').get(id));
+});
+
+// Update group
+router.put('/:id', requireGroupWrite, (req, res) => {
+  const { name, color, sync_enabled, leader_device_id, reboot_schedule, sync_backend } = req.body;
+  // Reject an unknown backend rather than storing it: the resolver reads anything unrecognised as
+  // 'auto', so a typo would silently give the operator a different protocol from the one they
+  // picked, with the UI still showing their typo back to them.
+  if (sync_backend !== undefined && !BACKENDS.includes(sync_backend)) {
+    return res.status(400).json({ error: `sync_backend must be one of: ${BACKENDS.join(', ')}` });
+  }
+  if (color && !VALID_COLOR.test(color)) return res.status(400).json({ error: 'invalid color format, use #RRGGBB' });
+  // #12 scheduled reboot: group-level default nightly-reboot time ("HH:MM" or null/'' = off).
+  // A member device's own reboot_schedule overrides this in the scheduler.
+  if (reboot_schedule !== undefined) {
+    let val = null;
+    if (reboot_schedule !== null && reboot_schedule !== '') {
+      if (!/^([01]\d|2[0-3]):([0-5]\d)$/.test(String(reboot_schedule))) {
+        return res.status(400).json({ error: 'reboot_schedule must be "HH:MM" (24h) or null' });
+      }
+      val = String(reboot_schedule);
+    }
+    db.prepare('UPDATE device_groups SET reboot_schedule = ? WHERE id = ?').run(val, req.params.id);
+  }
+  if (name) db.prepare('UPDATE device_groups SET name = ? WHERE id = ?').run(name, req.params.id);
+  if (color) db.prepare('UPDATE device_groups SET color = ? WHERE id = ?').run(color, req.params.id);
+  // #group-sync: enable synchronized playback + optional pinned leader.
+  if (sync_enabled !== undefined) {
+    db.prepare('UPDATE device_groups SET sync_enabled = ? WHERE id = ?').run(sync_enabled ? 1 : 0, req.params.id);
+  }
+  if (leader_device_id !== undefined) {
+    if (leader_device_id !== null) {
+      const isMember = db.prepare('SELECT 1 FROM device_group_members WHERE group_id = ? AND device_id = ?').get(req.params.id, leader_device_id);
+      if (!isMember) return res.status(400).json({ error: 'leader_device_id must be a member of this group' });
+    }
+    db.prepare('UPDATE device_groups SET leader_device_id = ? WHERE id = ?').run(leader_device_id || null, req.params.id);
+  }
+  if (sync_backend !== undefined) {
+    db.prepare('UPDATE device_groups SET sync_backend = ? WHERE id = ?').run(sync_backend, req.params.id);
+  }
+  // Re-push to every member so they enter/exit sync mode and refresh their is_leader flag.
+  // sync_backend belongs here too: switching protocol has to reach the players, or the group keeps
+  // running the old one until something unrelated happens to re-push.
+  if (sync_enabled !== undefined || leader_device_id !== undefined || sync_backend !== undefined) {
+    const members = db.prepare('SELECT device_id FROM device_group_members WHERE group_id = ?').all(req.params.id);
+    for (const m of members) pushPlaylistToDevice(req, m.device_id);
+  }
+  const updated = db.prepare('SELECT * FROM device_groups WHERE id = ?').get(req.params.id);
+  res.json({ ...updated, ...syncDecisionFor(updated) });
+});
+
+// #group-sync: manual "Resync now" — nudge every member to re-snap to the shared schedule
+// immediately. Sync is clock/schedule based (no leader), so this just forces an instant re-align
+// (handy after a content change or if an operator wants to eyeball alignment).
+router.post('/:id/resync', requireGroupWrite, (req, res) => {
+  const io = req.app.get('io');
+  const members = db.prepare('SELECT device_id FROM device_group_members WHERE group_id = ?').all(req.params.id);
+  if (io) {
+    const deviceNs = io.of('/device');
+    for (const m of members) deviceNs.to(m.device_id).emit('group:resync', { group_id: req.params.id });
+  }
+  res.json({ ok: true, notified: members.length });
+});
+
+// Delete group — converts group schedules to per-device schedules first
+router.delete('/:id', requireGroupWrite, (req, res) => {
+  const groupId = req.params.id;
+
+  const convert = db.transaction(() => {
+    // Find group schedules that need conversion
+    const groupSchedules = db.prepare('SELECT * FROM schedules WHERE group_id = ?').all(groupId);
+
+    // Find current group members
+    const members = db.prepare('SELECT device_id FROM device_group_members WHERE group_id = ?').all(groupId);
+
+    let converted = 0;
+
+    if (groupSchedules.length > 0 && members.length > 0) {
+        // workspace_id MUST be carried over. It is nullable with no default, so omitting it landed
+        // every converted schedule with workspace_id = NULL — and a null workspace does not merely
+        // look untidy, it makes the row unreachable in three directions at once:
+        //   - the schedule list and the all-screens calendar filter on workspace_id: invisible
+        //   - PUT and DELETE refuse a row with no workspace (403): undeletable
+        //   - services/scheduler.js has NO workspace filter: it keeps firing every 60 seconds
+        // i.e. "I deleted the group but the screens still switch at 9am and there is nothing in the
+        // calendar to remove". The only way out was direct database access.
+      const insert = db.prepare(`
+          INSERT INTO schedules (id, user_id, workspace_id, device_id, group_id, zone_id, content_id,
+          widget_id, layout_id, playlist_id, title, start_time, end_time, timezone,
+          recurrence, recurrence_end, priority, enabled, color, created_at, updated_at)
+          VALUES (?, ?, ?, ?, NULL, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+      `);
+
+      for (const schedule of groupSchedules) {
+        for (const member of members) {
+          insert.run(
+            // Prefer the schedule's own workspace, falling back to the group's, so a legacy
+            // group schedule predating workspace_id still converts into a reachable row.
+            uuidv4(), schedule.user_id, schedule.workspace_id || req.group.workspace_id, member.device_id,
+            schedule.zone_id, schedule.content_id, schedule.widget_id,
+            schedule.layout_id, schedule.playlist_id, schedule.title,
+            schedule.start_time, schedule.end_time, schedule.timezone,
+            schedule.recurrence, schedule.recurrence_end, schedule.priority,
+            schedule.enabled, schedule.color, schedule.created_at, schedule.updated_at
+          );
+        }
+        converted++;
+      }
+    }
+
+    // Delete group schedules explicitly (before group delete turns group_id to NULL via ON DELETE SET NULL)
+    db.prepare('DELETE FROM schedules WHERE group_id = ?').run(groupId);
+
+    // Delete the group (cascades to device_group_members)
+    db.prepare('DELETE FROM device_groups WHERE id = ?').run(groupId);
+
+    return { converted, devices: members.length };
+  });
+
+  const result = convert();
+  res.json({ success: true, schedules_converted: result.converted, devices: result.devices });
+});
+
+// Get devices in a group
+router.get('/:id/devices', requireGroupRead, (req, res) => {
+  const devices = db.prepare(`
+    SELECT d.* FROM devices d
+    JOIN device_group_members dgm ON d.id = dgm.device_id
+    WHERE dgm.group_id = ?
+    ORDER BY d.name ASC
+  `).all(req.params.id);
+  /*
+   * ⚠️ THIS ENDPOINT HAD NO SANITIZER AT ALL, and /api/groups is token-reachable with READ scope.
+   *
+   * `SELECT d.*` carries `device_token` — the credential a device proves with on the /device
+   * socket, i.e. full impersonation — plus `settings_pin` and `trigger_secret`. A read-scoped
+   * integration token could list a group and walk away with all three for every screen in it.
+   *
+   * The device_token half predates the trigger work; the trigger secret simply widened an
+   * existing hole. Same list treatment as GET /api/devices — see lib/device-sanitize.js, whose
+   * docblock this route was quietly contradicting.
+   */
+  res.json(devices.map(stripDeviceSecretsForList));
+});
+
+// Add device to group. If the group has a playlist set (via the assign-playlist
+// dropdown on the dashboard), the new device inherits it — both for drag-drop
+// onto the group section and for the Manage modal's checkboxes, which both
+// hit this endpoint. Without this, joining a group never auto-assigned the
+// group's playlist, leaving the new device on whatever it had before.
+//
+// Phase 2.2i: closes a pre-existing cross-tenant leak. Today the gate only
+// checked device.user_id == caller; a workspace_admin who happened to own a
+// device in another workspace could add it to a group in this workspace.
+// Now: the device must belong to the same workspace as the group.
+router.post('/:id/devices', requireGroupWrite, (req, res) => {
+  const { device_id } = req.body;
+  if (!device_id) return res.status(400).json({ error: 'device_id required' });
+  const device = db.prepare('SELECT workspace_id FROM devices WHERE id = ?').get(device_id);
+  if (!device) return res.status(404).json({ error: 'Device not found' });
+  if (device.workspace_id !== req.group.workspace_id) {
+    return res.status(403).json({ error: 'Device is not in this group\'s workspace' });
+  }
+  try {
+    db.prepare('INSERT OR IGNORE INTO device_group_members (device_id, group_id) VALUES (?, ?)').run(device_id, req.params.id);
+
+    /*
+     * ⚠️ Nothing is copied. Membership IS the assignment; the resolver reads it.
+     *
+     * This used to write the group's playlist onto the device — which destroyed any playlist the
+     * operator had set for that screen, because a copied id cannot say whether it was chosen or
+     * inherited. It also had to CLEAR the device when the group had no playlist, to stop a stale
+     * copy lingering. Neither is needed once resolution is live: a group with no playlist simply
+     * contributes nothing, and a device with an explicit override keeps it.
+     *
+     * The push still happens, because the device's resolved playlist may well have changed.
+     */
+    pushPlaylistToDevice(req, device_id);
+    res.status(201).json({ success: true, playlist_id: resolveDevicePlaylistId(device_id) });
+  } catch (e) {
+    res.status(400).json({ error: e.message });
+  }
+});
+
+// Remove device from group. Sync the device's playlist to whatever its
+// current group membership implies — symmetric with the join sync above.
+// - No remaining groups → clear playlist (Ungrouped).
+// - Remaining group with a playlist → adopt that playlist.
+// - Remaining group(s) but none have a playlist → clear playlist.
+// Without this, a device dragged out of a group keeps stale playlist state
+// from the group it just left.
+router.delete('/:id/devices/:deviceId', requireGroupWrite, (req, res) => {
+  const deviceId = req.params.deviceId;
+  db.prepare('DELETE FROM device_group_members WHERE device_id = ? AND group_id = ?').run(deviceId, req.params.id);
+  // Drop a leftover copy of the group's playlist so the last-resort branch of the resolver cannot
+  // resurrect it once the membership that justified it is gone. A device's OWN choice is untouched.
+  clearInheritedCopy(deviceId);
+
+  /*
+   * ⚠️ No re-derivation here either. This used to pick "any remaining group with a playlist",
+   * ordered by name — a winner no operator could see, predict or change, and the reason a device
+   * in two groups had no defined outcome. The resolver now answers it with a stated rule
+   * (priority, then oldest), so leaving a group is just deleting the membership row.
+   */
+  pushPlaylistToDevice(req, deviceId);
+
+  res.json({ success: true });
+});
+
+// Ensure a device has a playlist; auto-create one if missing.
+// Phase 2.2i: pre-emptive loop-closer for the future playlists.js migration.
+// The auto-created playlist lives in the same workspace as the device, so
+// once playlists.js scopes by workspace_id this helper's rows remain visible.
+function ensureDevicePlaylist(deviceId, userId) {
+  const device = db.prepare('SELECT workspace_id, name FROM devices WHERE id = ?').get(deviceId);
+  /*
+   * ⚠️ This one deliberately does NOT fork, unlike its twin in routes/assignments.js.
+   *
+   * The caller here is "add this content to every screen in the group" — the shared playlist IS the
+   * target. Forking would give each member a private copy and quietly end the group's ability to
+   * update them all, which is the opposite of what the operator asked for. The device-page path
+   * forks because there the operator is pointing at one screen; here they are pointing at the group.
+   */
+  const resolved = resolveDevicePlaylistId(deviceId);
+  if (resolved) return resolved;
+  const playlistId = uuidv4();
+  db.prepare('INSERT INTO playlists (id, user_id, workspace_id, name, is_auto_generated) VALUES (?, ?, ?, ?, 1)')
+    .run(playlistId, userId, device?.workspace_id || null, `${device?.name || 'Display'} playlist`);
+  // Made FOR this screen, so it is a choice: without the stamp the resolver looks past it.
+  db.prepare("UPDATE devices SET playlist_id = ?, playlist_source = 'device' WHERE id = ?").run(playlistId, deviceId);
+  return playlistId;
+}
+
+// Mark playlist as draft (called after any item mutation)
+function markDraft(playlistId) {
+  db.prepare("UPDATE playlists SET status = 'draft', updated_at = strftime('%s','now') WHERE id = ?").run(playlistId);
+}
+
+// Push playlist update to a device (used by assign-playlist which doesn't modify items)
+function pushPlaylistToDevice(req, deviceId) {
+  try {
+    const io = req.app.get('io');
+    if (!io) return;
+    const { buildPlaylistPayload } = require('../ws/deviceSocket');
+    const commandQueue = require('../lib/command-queue');
+    commandQueue.queueOrEmitPlaylistUpdate(io.of('/device'), deviceId, buildPlaylistPayload);
+  } catch (e) { /* silent */ }
+}
+
+// Bulk assign content to all devices in a group (adds to each device's playlist).
+// Phase 2.2i: closes a pre-existing cross-tenant leak. Today the gate only
+// checked content.user_id == caller; the content could live in any workspace
+// the caller had any reach into. Now: content must live in the group's
+// workspace (or be a platform-template content row, workspace_id IS NULL).
+router.post('/:id/assign-content', requireGroupWrite, (req, res) => {
+  const { content_id, duration_sec } = req.body;
+  if (!content_id) return res.status(400).json({ error: 'content_id required' });
+
+  // Verify content lives in the same workspace as the group (or is a
+  // platform-template row).
+  const content = db.prepare('SELECT id, workspace_id, duration_sec FROM content WHERE id = ?').get(content_id);
+  if (!content) return res.status(404).json({ error: 'Content not found' });
+  if (content.workspace_id && content.workspace_id !== req.group.workspace_id) {
+    return res.status(403).json({ error: 'Content is not in this group\'s workspace' });
+  }
+  // #237: same duration rule as every other add path — a video defaults to its own length,
+  // and here a wrong default would be wrong on every screen in the group at once.
+  const itemDuration = resolveItemDuration(duration_sec, content);
+
+  const members = db.prepare('SELECT device_id FROM device_group_members WHERE group_id = ?').all(req.params.id);
+
+  /*
+   * ⚠️ De-duplicated by PLAYLIST, not by device.
+   *
+   * Members of a group with a shared playlist all resolve to the SAME playlist, so looping over
+   * devices inserted the item once per member — add one image to a group of five screens and it
+   * appeared five times in a row. Pre-existing (the old copy made every member's playlist_id
+   * identical too), and the resolver does not change it: the fix is to insert once per distinct
+   * playlist.
+   */
+  const transaction = db.transaction(() => {
+    const seen = new Set();
+    for (const m of members) {
+      const playlistId = ensureDevicePlaylist(m.device_id, req.user.id);
+      if (seen.has(playlistId)) continue;
+      seen.add(playlistId);
+      const max = db.prepare('SELECT COALESCE(MAX(sort_order),0)+1 as next FROM playlist_items WHERE playlist_id = ?').get(playlistId);
+      db.prepare('INSERT INTO playlist_items (playlist_id, content_id, sort_order, duration_sec) VALUES (?, ?, ?, ?)')
+        .run(playlistId, content_id, max.next, itemDuration);
+      markDraft(playlistId);
+    }
+  });
+  transaction();
+
+  res.json({ success: true, devices_updated: members.length });
+});
+
+// Assign an existing playlist to all devices in a group, and persist the
+// choice on the group itself so future joiners inherit it (see POST /:id/devices).
+//
+// Phase 2.2i: closes a pre-existing cross-tenant leak. Today the gate only
+// checked playlist.user_id == caller; the playlist could live in any
+// workspace the caller could reach. Now: playlist must live in the group's
+// workspace. Playlists don't currently have a NULL/template path - playlists.js
+// migration is deferred, so this check uses the raw workspace_id column that
+// 2.2i's ensureDevicePlaylist loop-closer also writes to.
+router.post('/:id/assign-playlist', requireGroupWrite, (req, res) => {
+  const { playlist_id } = req.body;
+  if (!playlist_id) return res.status(400).json({ error: 'playlist_id required' });
+
+  const playlist = db.prepare('SELECT id, workspace_id FROM playlists WHERE id = ?').get(playlist_id);
+  if (!playlist) return res.status(404).json({ error: 'Playlist not found' });
+  if (playlist.workspace_id && playlist.workspace_id !== req.group.workspace_id) {
+    return res.status(403).json({ error: 'Playlist is not in this group\'s workspace' });
+  }
+
+  const members = db.prepare('SELECT device_id FROM device_group_members WHERE group_id = ?').all(req.params.id);
+
+  /*
+   * ⚠️ One row is written: the GROUP's. The fan-out that walked every member and stamped the id on
+   * each of them is gone — that loop was the mechanism by which a group edit destroyed per-device
+   * choices, and the reason a member added later inherited nothing until someone touched the group
+   * again. Members are still pushed to, because what they resolve to has changed.
+   */
+  db.prepare('UPDATE device_groups SET playlist_id = ? WHERE id = ?').run(playlist_id, req.params.id);
+
+  for (const m of members) pushPlaylistToDevice(req, m.device_id);
+  res.json({ success: true, devices_updated: members.length });
+});
+
+// Send command to all devices in a group (reboot/shutdown/screen on/off etc.)
+router.post('/:id/command', requireScope('full'), requireGroupWrite, (req, res) => {
+  const { type, payload } = req.body;
+  if (!type) return res.status(400).json({ error: 'command type required' });
+  if (!ALLOWED_COMMANDS.includes(type)) return res.status(400).json({ error: 'invalid command type' });
+
+  // SELECT * because the capability check needs the platform/declaration columns, not just the
+  // three fields the response uses.
+  const devices = db.prepare(`
+    SELECT d.* FROM devices d
+    JOIN device_group_members dgm ON d.id = dgm.device_id
+    WHERE dgm.group_id = ?
+  `).all(req.params.id);
+
+  const deviceNs = req.app.get('io').of('/device');
+  const results = [];
+
+  for (const device of devices) {
+    // A group is the mixed-platform case by definition — a lobby group holding two Android panels
+    // and a BrightSign gets "reboot" sent to all three, and the one that cannot honour it used to
+    // report 'sent'. Reporting per-device rather than refusing the whole command: the operator's
+    // intent is valid for the members that can do it, and failing the lot because one member is a
+    // browser tab would be its own bug.
+    const r = deliverCommand(deviceNs, device, type, payload);
+    results.push({ device_id: device.id, name: device.name, ...r });
+  }
+
+  const sent = results.filter(r => r.status === 'sent').length;
+  const offline = results.filter(r => r.status === 'offline' || r.status === 'queued').length;
+  const unsupported = results.filter(r => r.status === 'unsupported').length;
+  console.log(`Group command '${type}' sent to group '${req.group.name}': ${sent} sent, ${offline} offline, ${unsupported} unsupported`);
+  res.json({ success: true, sent, offline, unsupported, total: devices.length, results });
+});
+
+module.exports = router;
