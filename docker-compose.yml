@@ -36,5 +36,31 @@ services:
       MTX_PATHS_CAMERA-ROBOTER-2_SOURCEONDEMAND: "yes"
       MTX_PATHS_CAMERA-ROBOTER-2_RTSPTRANSPORT: tcp
 
+  # Combines both camera feeds into ONE side-by-side video stream server-side.
+  # Needed because this TV's chip can only hardware-decode one H.264 stream at
+  # a time — sending it two separate streams makes it flicker between them.
+  # Pulls from mediamtx's own re-stream (not the cameras directly, to avoid a
+  # third concurrent connection to already-limited camera hardware), combines
+  # with ffmpeg's hstack filter, and pushes the result back into mediamtx as
+  # a new path. The TV then only has to decode one stream.
+  camera-combiner:
+    image: jrottenberg/ffmpeg:6.1-ubuntu
+    restart: unless-stopped
+    depends_on:
+      - mediamtx
+    entrypoint: []
+    command:
+      - sh
+      - -c
+      - >
+        while true; do
+          ffmpeg -rtsp_transport tcp -i rtsp://mediamtx:8554/camera-roboter-2
+                 -rtsp_transport tcp -i rtsp://mediamtx:8554/camera-roboter-1
+                 -filter_complex "[0:v]scale=960:540[l];[1:v]scale=960:540[r];[l][r]hstack=inputs=2[out]"
+                 -map "[out]" -an -c:v libx264 -preset veryfast -tune zerolatency -g 50
+                 -f rtsp -rtsp_transport tcp rtsp://mediamtx:8554/combined-view;
+          sleep 5;
+        done
+
 volumes:
   st-data:
